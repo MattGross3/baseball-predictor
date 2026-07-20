@@ -16,6 +16,9 @@
   --color-critical: #dc2626;
   --color-critical-soft: #dc26261a;
   --color-warning: #ca8a04;
+  --color-warning-soft: #ca8a041a;
+  --color-nrfi: #7c3aed;
+  --color-nrfi-soft: #7c3aed1a;
 
   /* Light surface system, matching the approved reference design. */
   --color-surface: #fafaf7;

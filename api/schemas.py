@@ -111,6 +111,16 @@ class GameSlateSummaryOut(BaseModel):
     latest_odds: OddsOut | None = None
     run_line_pick_side: str | None = None
     run_line_edge: float | None = None
+    # Pitching matchup - season ERA/WHIP for each side's starter, computed
+    # the same way features/pitcher_features.py does for the model (not a
+    # separate stat source), so this always agrees with what the model
+    # actually saw.
+    home_starter_name: str | None = None
+    home_starter_era: float | None = None
+    home_starter_whip: float | None = None
+    away_starter_name: str | None = None
+    away_starter_era: float | None = None
+    away_starter_whip: float | None = None
 
 
 class BacktestResultOut(BaseModel):

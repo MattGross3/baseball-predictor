@@ -11,8 +11,9 @@ from sqlalchemy.orm import Session
 from api.schemas import GameFeaturesOut, GameOut, GamePredictionsOut, GameSlateSummaryOut, OddsOut, PredictionOut
 from backtest.clv_tracker import american_to_implied_prob
 from database.db import get_db
-from database.models import Game, GameFeatureCache, OddsSnapshot, Prediction
+from database.models import Game, GameFeatureCache, OddsSnapshot, Player, Prediction
 from features.build_feature_matrix import build_game_feature_row
+from features.pitcher_features import compute_starter_features
 
 router = APIRouter(prefix="/games", tags=["games"])
 
@@ -94,13 +95,44 @@ def get_games_today_summary(date: dt.date | None = None, db: Session = Depends(g
             select(OddsSnapshot).where(OddsSnapshot.game_id == game.id).order_by(OddsSnapshot.timestamp.desc())
         ).scalars().first()
 
+        # The preferred total model (XGBoost) predicts one combined number,
+        # not a per-side split - only the Poisson baseline models each
+        # side as its own distribution and can say "3.4 home, 5.1 away".
+        # Fall back to whichever total prediction actually has a split
+        # rather than showing "-" for the score breakdown just because the
+        # more-accurate overall model can't produce one.
+        split_source = total if (total and total.predicted_home_value is not None) else next(
+            (p for p in predictions if p.target_type == "total" and p.predicted_home_value is not None), None
+        )
+
+        # Pitching matchup - include_statcast_trend=False keeps this to a
+        # cheap DB aggregation (season ERA/WHIP), not a live Statcast pull;
+        # fine for a per-game feature build, too slow to repeat for every
+        # game on the slate on every page load.
+        home_starter = db.get(Player, game.home_starter_id) if game.home_starter_id else None
+        away_starter = db.get(Player, game.away_starter_id) if game.away_starter_id else None
+        home_pitcher_stats = (
+            compute_starter_features(db, game.home_starter_id, game.date, include_statcast_trend=False)
+            if game.home_starter_id else None
+        )
+        away_pitcher_stats = (
+            compute_starter_features(db, game.away_starter_id, game.date, include_statcast_trend=False)
+            if game.away_starter_id else None
+        )
+
         summary = GameSlateSummaryOut(game_id=game.id)
         summary.moneyline_probability = moneyline.predicted_probability if moneyline and moneyline.predicted_probability is not None else None
         summary.total_prediction = total.predicted_value if total and total.predicted_value is not None else None
-        summary.total_home_prediction = total.predicted_home_value if total and total.predicted_home_value is not None else None
-        summary.total_away_prediction = total.predicted_away_value if total and total.predicted_away_value is not None else None
+        summary.total_home_prediction = split_source.predicted_home_value if split_source else None
+        summary.total_away_prediction = split_source.predicted_away_value if split_source else None
         summary.nrfi_probability = nrfi.predicted_probability if nrfi and nrfi.predicted_probability is not None else None
         summary.latest_odds = latest_odds
+        summary.home_starter_name = home_starter.name if home_starter else None
+        summary.home_starter_era = home_pitcher_stats["era_season"] if home_pitcher_stats else None
+        summary.home_starter_whip = home_pitcher_stats["whip_season"] if home_pitcher_stats else None
+        summary.away_starter_name = away_starter.name if away_starter else None
+        summary.away_starter_era = away_pitcher_stats["era_season"] if away_pitcher_stats else None
+        summary.away_starter_whip = away_pitcher_stats["whip_season"] if away_pitcher_stats else None
 
         # Run line ("spread") pick: which side the model favors against the
         # market's line, from the same predicted home/away run values the
@@ -108,10 +140,10 @@ def get_games_today_summary(date: dt.date | None = None, db: Session = Depends(g
         # "predicted home runs minus predicted away runs" is exactly a
         # predicted margin, directly comparable to a run line.
         if (
-            total and total.predicted_home_value is not None and total.predicted_away_value is not None
+            split_source is not None
             and latest_odds is not None and latest_odds.run_line is not None
         ):
-            predicted_margin = total.predicted_home_value - total.predicted_away_value
+            predicted_margin = split_source.predicted_home_value - split_source.predicted_away_value
             # run_line is always the home team's own line (see
             # ingestion/odds_api._extract_best_lines) - e.g. -1.5 means home
             # is favored by 1.5, +1.5 means home is the underdog getting

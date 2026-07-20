@@ -58,6 +58,15 @@ def _era(rows) -> float | None:
     return round(9 * er / ip, 2)
 
 
+def _whip(rows) -> float | None:
+    ip = sum((r.PitcherGameLog.ip or 0) for r in rows)
+    bb = sum((r.PitcherGameLog.bb or 0) for r in rows)
+    h = sum((r.PitcherGameLog.h or 0) for r in rows)
+    if not ip:
+        return None
+    return round((bb + h) / ip, 2)
+
+
 def compute_starter_features(
     db: Session,
     pitcher_id: int,
@@ -107,6 +116,7 @@ def compute_starter_features(
 
     return {
         "era_season": _era(season_rows),
+        "whip_season": _whip(season_rows),
         "fip_season": estimate_fip(hr_total, bb_total, k_total, ip_total) if ip_total else None,
         "siera_season": None,  # requires FanGraphs' regression model - see ingestion/fangraphs.py
         "era_last_3_starts": _era(last_3_starts),

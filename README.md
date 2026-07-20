@@ -359,16 +359,32 @@ URL baked into the JS bundle. Production (`web/Dockerfile` +
 
 Pages:
 
-- **Today's Slate** (`/`) - every game for a date via `GET /games/today/summary`:
-  expected win % for both teams, predicted total (and, once the totals
-  model exposes a per-side split, a home/away score split), a recommended
-  pick (moneyline or over/under, whichever clears an edge-vs-market
-  threshold) with a confidence score, and the real moneyline/spread/total
-  odds for that game (from the latest `odds_snapshots` row) so you can see
-  the market number next to the model's own take, not just an abstract
-  "edge." Games without odds yet (too far out, or the month's free-tier
-  budget is used up) show `—` for the odds columns rather than a
-  fabricated number.
+- **Today's Slate** (`/`) - every game for a date via `GET /games/today/summary`,
+  as a 2-row-per-game table (away row, home row):
+  - **Predicted Score / ML** - each side's predicted runs (falls back from
+    the preferred totals model - XGBoost, which predicts one combined
+    number - to the Poisson baseline, which models each side as its own
+    distribution and *can* split a score, whenever the preferred model
+    can't) plus that side's real moneyline price.
+  - **Spread** - the run line from the home team's own perspective (see
+    `ingestion/odds_api._extract_best_lines`) plus its real price on the
+    side we actually have a quote for; the side the model's predicted
+    margin favors against that line gets a highlighted border, not a
+    fabricated "both sides priced the same" number for the side whose
+    price we don't have.
+  - **Total** - the real over/under line and price for each side, with
+    the side the model favors (by at least half a run against the market
+    line) highlighted.
+  - **NRFI** - Yes/No, highlighted on whichever the model's probability
+    favors.
+  - Underneath each team, the starting pitcher's name and season ERA/WHIP
+    (`features/pitcher_features.compute_starter_features`, the same
+    function the models themselves use - this never disagrees with what
+    the model actually saw).
+
+  Games without odds yet (too far out, or the month's free-tier budget is
+  used up) show `—` for the odds-dependent cells rather than a fabricated
+  number.
 - **Game Detail** (`/games/:id`) - the same metrics plus every stored
   prediction (one row per trained model, not just the one Today's Slate
   displays) and the full per-side feature breakdown (fetched lazily, only

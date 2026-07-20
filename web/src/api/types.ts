@@ -93,6 +93,12 @@ export interface GameSlateSummary {
   latest_odds: Odds | null
   run_line_pick_side: string | null
   run_line_edge: number | null
+  home_starter_name: string | null
+  home_starter_era: number | null
+  home_starter_whip: number | null
+  away_starter_name: string | null
+  away_starter_era: number | null
+  away_starter_whip: number | null
 }
 
 // features/build_feature_matrix.py's nested dict - only the shapes the UI
