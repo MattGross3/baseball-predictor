@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import threading
 from functools import lru_cache
 
 import pandas as pd
@@ -75,8 +76,21 @@ def ingest_umpire_assignment(db: Session, mlb_game_id: int) -> int:
     return written
 
 
+# Guards _season_league_pitches's actual computation (not just its cache
+# dict) - functools.lru_cache only locks around the cache lookup/store,
+# not around the wrapped call itself, so two threads racing on the same
+# uncached season both start their own full league-wide statcast() pull
+# instead of one waiting on the other. That's exactly what happened
+# between api/main.py's startup warm-up thread and the first real
+# request: both fired the same ~1-2 minute pull concurrently, doubling
+# the load on Savant's endpoint and turning it into a 12-minute request.
+# The lock makes the second caller block and then get a cheap cache hit
+# instead of doing redundant, contending work.
+_season_league_pitches_lock = threading.Lock()
+
+
 @lru_cache(maxsize=8)
-def _season_league_pitches(season: int) -> pd.DataFrame:
+def _season_league_pitches_uncached(season: int) -> pd.DataFrame:
     """Whole-season, league-wide Statcast pitch log, fetched once and
     cached in-process - reused for every umpire/game evaluated in that
     season instead of a fresh ~45-day `statcast()` pull per (umpire,
@@ -88,7 +102,8 @@ def _season_league_pitches(season: int) -> pd.DataFrame:
     A ~2-week league-wide pull was measured at ~7.7s / ~57k rows / ~66MB,
     so a full ~4.5-month season is a one-time cost of roughly a minute and
     several hundred MB per training run - trivial next to re-paying that
-    per umpire-game.
+    per umpire-game. Call `_season_league_pitches` (below), not this
+    directly, unless you specifically want the race documented above.
     """
     start = dt.date(season, 3, 1)
     end = dt.date(season, 12, 31)
@@ -97,6 +112,11 @@ def _season_league_pitches(season: int) -> pd.DataFrame:
     except Exception as exc:
         log.warning("Season-wide Statcast pull failed for %s (%s)", season, exc)
         return pd.DataFrame()
+
+
+def _season_league_pitches(season: int) -> pd.DataFrame:
+    with _season_league_pitches_lock:
+        return _season_league_pitches_uncached(season)
 
 
 def compute_umpire_zone_history(db: Session, umpire_name: str, as_of_date: dt.date, lookback_days: int = 45) -> dict:

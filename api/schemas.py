@@ -45,6 +45,7 @@ class GameOut(BaseModel):
 class GameFeaturesOut(BaseModel):
     game_id: int
     features: dict[str, Any]
+    computed_at: dt.datetime | None = None
 
 
 class PredictionOut(BaseModel):
@@ -56,6 +57,16 @@ class PredictionOut(BaseModel):
     target_type: str
     predicted_value: float | None = None
     predicted_probability: float | None = None
+    predicted_side: str | None = None
+    predicted_home_value: float | None = None
+    predicted_away_value: float | None = None
+    home_probability: float | None = None
+    away_probability: float | None = None
+    market_home_probability: float | None = None
+    market_away_probability: float | None = None
+    confidence: float | None = None
+    actual_outcome: str | None = None
+    target_unit: str | None = None
     created_at: dt.datetime
 
 
@@ -80,6 +91,28 @@ class OddsOut(BaseModel):
     source: str
 
 
+class GameSlateSummaryOut(BaseModel):
+    game_id: int
+    moneyline_probability: float | None = None
+    total_prediction: float | None = None
+    total_home_prediction: float | None = None
+    total_away_prediction: float | None = None
+    nrfi_probability: float | None = None
+    pick_type: str | None = None
+    pick_side: str | None = None
+    projected_value: float | None = None
+    market_value: float | None = None
+    confidence: float | None = None
+    edge: float | None = None
+    # Raw odds (moneyline/run line/total prices), not just the computed
+    # pick above - the dashboard shows these directly on Today's Slate so
+    # a user can see the real market number next to the model's take, not
+    # just "the model likes the over."
+    latest_odds: OddsOut | None = None
+    run_line_pick_side: str | None = None
+    run_line_edge: float | None = None
+
+
 class BacktestResultOut(BaseModel):
     model: str
     target_type: str
@@ -96,6 +129,20 @@ class BacktestResultOut(BaseModel):
     roi_kelly: float | None = None
     clv_avg: float | None = None
     n_bets: int
+    # Raw win/loss counts (classification targets only) - the ROI tab's
+    # fallback for date ranges with no odds coverage to compute ROI from.
+    n_games: int | None = None
+    wins: int | None = None
+    losses: int | None = None
+    computed_at: dt.datetime | None = None
+
+
+class ModelInfoOut(BaseModel):
+    model_name: str
+    target_type: str
+    version: str
+    trained_at: dt.datetime
+    metrics: dict[str, Any]
 
 
 class RetrainRequest(BaseModel):

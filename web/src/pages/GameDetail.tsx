@@ -30,22 +30,32 @@ export function GameDetail() {
   const [game, setGame] = useState<Game | null>(null)
   const [predictions, setPredictions] = useState<Prediction[]>([])
   const [features, setFeatures] = useState<GameFeatures | null>(null)
+  const [featuresComputedAt, setFeaturesComputedAt] = useState<string | null>(null)
+  const [featuresLoading, setFeaturesLoading] = useState(false)
+  const [featuresError, setFeaturesError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<(typeof TABS)[number]>('Predictions')
 
+  // Game + predictions are already-computed DB reads - fast. Features used
+  // to be fetched in the same Promise.all, which meant the whole page (even
+  // the Predictions tab, the default view) sat on a loading spinner behind
+  // a live Statcast feature build no one had asked to see yet. Loaded
+  // separately below, only once the Feature breakdown tab is opened.
   useEffect(() => {
     if (!Number.isFinite(id)) return
     let cancelled = false
     setLoading(true)
     setError(null)
+    setFeatures(null)
+    setFeaturesComputedAt(null)
+    setFeaturesError(null)
 
-    Promise.all([api.getGame(id), api.getGamePredictions(id), api.getGameFeatures(id)])
-      .then(([g, p, f]) => {
+    Promise.all([api.getGame(id), api.getGamePredictions(id)])
+      .then(([g, p]) => {
         if (cancelled) return
         setGame(g)
         setPredictions(p.predictions)
-        setFeatures(f.features)
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -58,7 +68,30 @@ export function GameDetail() {
     }
   }, [id])
 
-  if (loading) return <LoadingState label="Loading game - the feature breakdown pulls live Statcast data, so this can take a bit…" />
+  function loadFeatures(refresh = false) {
+    if (!Number.isFinite(id)) return
+    setFeaturesLoading(true)
+    setFeaturesError(null)
+    api
+      .getGameFeatures(id, refresh)
+      .then((f) => {
+        setFeatures(f.features)
+        setFeaturesComputedAt(f.computed_at)
+      })
+      .catch((err: unknown) => {
+        setFeaturesError(err instanceof ApiError ? `API error (${err.status}): ${err.message}` : 'Could not reach the API.')
+      })
+      .finally(() => setFeaturesLoading(false))
+  }
+
+  useEffect(() => {
+    if (tab === 'Feature breakdown' && features === null && !featuresLoading && !featuresError) {
+      loadFeatures()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, id])
+
+  if (loading) return <LoadingState label="Loading game…" />
   if (error) return <ErrorState message={error} />
   if (!game) return <EmptyState message="Game not found." />
 
@@ -66,6 +99,11 @@ export function GameDetail() {
   const total = preferredPrediction(predictions, 'total')
   const nrfi = preferredPrediction(predictions, 'nrfi')
   const homeProb = moneyline?.predicted_probability ?? null
+  const totalSplit = total?.predicted_home_value != null && total?.predicted_away_value != null
+    ? `${game.home_team.abbreviation} ${total.predicted_home_value.toFixed(1)} · ${game.away_team.abbreviation} ${total.predicted_away_value.toFixed(1)}`
+    : total?.predicted_value != null
+      ? total.predicted_value.toFixed(1)
+      : '—'
 
   return (
     <div>
@@ -89,7 +127,7 @@ export function GameDetail() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
         <MetricCard label={`${game.home_team.abbreviation} expected win %`} value={homeProb != null ? `${Math.round(homeProb * 100)}%` : '—'} />
         <MetricCard label={`${game.away_team.abbreviation} expected win %`} value={homeProb != null ? `${Math.round((1 - homeProb) * 100)}%` : '—'} />
-        <MetricCard label="Predicted total runs" value={total?.predicted_value != null ? total.predicted_value.toFixed(1) : '—'} />
+        <MetricCard label="Predicted total runs" value={totalSplit} />
         <MetricCard label="NRFI probability" value={nrfi?.predicted_probability != null ? `${Math.round(nrfi.predicted_probability * 100)}%` : '—'} />
       </div>
 
@@ -140,7 +178,24 @@ export function GameDetail() {
         )
       )}
 
+      {tab === 'Feature breakdown' && featuresLoading && (
+        <LoadingState label="Building the feature breakdown - pulls live Statcast data the first time, so this can take a bit…" />
+      )}
+
+      {tab === 'Feature breakdown' && !featuresLoading && featuresError && <ErrorState message={featuresError} />}
+
       {tab === 'Feature breakdown' && features && (
+        <div>
+          <div className="flex items-center justify-between mb-4 text-xs text-[color:var(--color-ink-faint)]">
+            <span>{featuresComputedAt ? `Computed ${new Date(featuresComputedAt).toLocaleString()}` : ''}</span>
+            <button
+              onClick={() => loadFeatures(true)}
+              disabled={featuresLoading}
+              className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface-card)] px-3 py-1.5 font-medium hover:border-[color:var(--color-home)]/50 transition-colors disabled:opacity-50"
+            >
+              Refresh
+            </button>
+          </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="space-y-4">
             <div className="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-away)]">
@@ -234,6 +289,7 @@ export function GameDetail() {
               />
             </Panel>
           </div>
+        </div>
         </div>
       )}
     </div>

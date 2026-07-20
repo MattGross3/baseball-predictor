@@ -44,6 +44,16 @@ export interface Prediction {
   target_type: TargetType
   predicted_value: number | null
   predicted_probability: number | null
+  predicted_side: string | null
+  predicted_home_value: number | null
+  predicted_away_value: number | null
+  home_probability: number | null
+  away_probability: number | null
+  market_home_probability: number | null
+  market_away_probability: number | null
+  confidence: number | null
+  actual_outcome: string | null
+  target_unit: string | null
   created_at: string
 }
 
@@ -51,6 +61,38 @@ export interface GamePredictions {
   game_id: number
   predictions: Prediction[]
   edge_vs_market: { model_probability_home: number; market_implied_probability_home: number; edge: number } | null
+}
+
+export interface Odds {
+  id: number
+  game_id: number
+  timestamp: string
+  moneyline_home: number | null
+  moneyline_away: number | null
+  run_line: number | null
+  run_line_odds: number | null
+  total: number | null
+  over_odds: number | null
+  under_odds: number | null
+  source: string
+}
+
+export interface GameSlateSummary {
+  game_id: number
+  moneyline_probability: number | null
+  total_prediction: number | null
+  total_home_prediction: number | null
+  total_away_prediction: number | null
+  nrfi_probability: number | null
+  pick_type: string | null
+  pick_side: string | null
+  projected_value: number | null
+  market_value: number | null
+  confidence: number | null
+  edge: number | null
+  latest_odds: Odds | null
+  run_line_pick_side: string | null
+  run_line_edge: number | null
 }
 
 // features/build_feature_matrix.py's nested dict - only the shapes the UI
@@ -126,6 +168,7 @@ export interface GameFeatures {
 export interface GameFeaturesResponse {
   game_id: number
   features: GameFeatures
+  computed_at: string | null
 }
 
 export interface BacktestResult {
@@ -141,4 +184,16 @@ export interface BacktestResult {
   n_bets: number
   mae?: number
   rmse?: number
+  n_games?: number | null
+  wins?: number | null
+  losses?: number | null
+  computed_at: string | null
+}
+
+export interface ModelInfo {
+  model_name: string
+  target_type: string
+  version: string
+  trained_at: string
+  metrics: Record<string, number>
 }

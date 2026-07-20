@@ -359,29 +359,39 @@ URL baked into the JS bundle. Production (`web/Dockerfile` +
 
 Pages:
 
-- **Today's Slate** (`/`) - every game for a date: expected win % for both
-  teams, predicted total, NRFI %.
+- **Today's Slate** (`/`) - every game for a date via `GET /games/today/summary`:
+  expected win % for both teams, predicted total (and, once the totals
+  model exposes a per-side split, a home/away score split), a recommended
+  pick (moneyline or over/under, whichever clears an edge-vs-market
+  threshold) with a confidence score, and the real moneyline/spread/total
+  odds for that game (from the latest `odds_snapshots` row) so you can see
+  the market number next to the model's own take, not just an abstract
+  "edge." Games without odds yet (too far out, or the month's free-tier
+  budget is used up) show `—` for the odds columns rather than a
+  fabricated number.
 - **Game Detail** (`/games/:id`) - the same metrics plus every stored
   prediction (one row per trained model, not just the one Today's Slate
-  displays) and the full per-side feature breakdown.
+  displays) and the full per-side feature breakdown (fetched lazily, only
+  once that tab is opened - see the performance note below).
 - **Previous Games** (`/previous-games`) - final games from the last
   3/7/14 days next to what the model predicted going in, with a
   Correct/Missed call on the winner and the total-runs miss distance.
 - **Backtest** (`/backtest`) - accuracy/log-loss/Brier/MAE/ROI/CLV for a
-  model over a date range; the weekly trend is a separate opt-in "Load
-  weekly trend" action, not automatic (see the performance note below).
+  model over a date range, cached per (model, range) so repeat visits are
+  instant (see the performance note below).
 - **Model Comparison** (`/compare`) - baseline vs. XGBoost side by side,
   plus a real 50/50 blend of both models' stored predictions scored
   against actual outcomes.
-
-**No odds/weather in the UI, by design.** Early versions showed an
-"edge vs. market" column and a park/weather block - both always empty
-without `ODDS_API_KEY`/`WEATHER_API_KEY`, which is dead weight for anyone
-running this without those. The UI leads with the model's own expected win
-probability instead (always available, since it only needs a trained
-model); the backend odds/weather ingestion and the `/games/{id}/odds` API
-endpoint are untouched and start working the moment you add a key - the
-frontend change is purely presentational.
+- **ROI** (`/roi`) - season-by-season rate of return betting the
+  moneyline model's favored side (flat $100/bet, only when it clears a
+  2-point edge over the market), with win/loss record and win% always
+  shown alongside it. Falls back to record-only (no ROI number) for any
+  season without enough odds history to simulate real bets - see
+  `backtest_engine.run_backtest`'s `wins`/`losses` fields.
+- **Models** (`/models`) - what each of the four model families (moneyline,
+  run total, NRFI, player props) predicts, its baseline vs. production
+  algorithm, the features it uses, and its live held-out test metrics
+  pulled straight from `model_registry` via `GET /models`.
 
 **Every prediction is stored once per model family, not recomputed on
 view.** `GET /games/{id}/predictions` is a pure DB read - nothing in the
@@ -390,23 +400,36 @@ dashboard triggers a live model run. `models/predict.py` upserts on
 a game updates that model's existing row instead of appending a duplicate,
 but *different* model families (`moneyline_logistic` vs
 `moneyline_xgboost`) intentionally get separate rows - Model Comparison's
-blend needs both at once. The frontend picks the "headline" model per
-target the same way the backend does (`web/src/lib/predictions.ts` mirrors
-`models/predict.py`'s `PREFERRED_MODEL_BY_TARGET`), so Today's Slate always
-shows the production (XGBoost) model's number even though Game Detail's
-predictions table lists every model.
+blend needs both at once, and `GET /games/today/summary` (Today's Slate)
+picks the same preferred model per target that `models/predict.py`'s
+`PREFERRED_MODEL_BY_TARGET` does, server-side, rather than shipping every
+model's prediction to the client and picking there.
 
-**Performance note**: `/backtest/results` rebuilds the full per-game
-feature set from scratch on every call (no caching - see
-[Feature engineering](#feature-engineering)'s leakage-discipline note), so
-it's a genuinely multi-second call, not an instant lookup. The Backtest and
-Model Comparison pages default to a 7-day range and load the (much slower)
-weekly trend chart as a separate, explicit action rather than blocking the
-initial page render - widen the range deliberately, not as something you
-wait on by default.
+**Performance note**: `/backtest/results` and `/games/{id}/features` both
+used to rebuild their full result from scratch on every call - genuinely
+slow (tens of seconds for a backtest, several seconds for a feature
+breakdown's live Statcast pulls) and the dominant source of "buffering"
+complaints on the dashboard. Both are now cached server-side
+(`backtest_cache` / `game_feature_cache` tables) and served instantly on
+repeat requests for the same (model, date range) or game, with an explicit
+`?refresh=true` escape hatch (surfaced as a "Refresh" button, next to a
+"Computed <time>" timestamp) for when you actually want a recomputation -
+e.g. after retraining, or after new odds/Statcast data lands. The Backtest
+and Model Comparison pages still default to a 7-day range and load the
+(much slower, first time) weekly trend chart as a separate, explicit
+action rather than blocking the initial page render.
+
+The API server also pre-warms the umpire zone-history Statcast cache in a
+background thread at startup (`api/main.py`), so the first `/backtest/*`
+or `/games/*/features` call after a restart doesn't personally pay that
+~1-2 minute cold-cache cost - see `ingestion/umpire_scorecards.py`'s
+`_season_league_pitches_lock`, which also fixes a real bug this surfaced:
+the warm-up thread and a real request racing on the same uncached season
+used to both fire their own full league-wide Statcast pull concurrently,
+turning what should've been a ~90s cold start into a 12-minute one.
 
 Verified with a headless-Chromium smoke test (`web/verify.mjs`, via
-Playwright) against the live API with real data - all five pages/routes
+Playwright) against the live API with real data - all pages/routes
 load with zero console errors; screenshots are gitignored (dev artifacts,
 not part of the app).
 

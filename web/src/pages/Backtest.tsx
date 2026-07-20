@@ -16,9 +16,10 @@ interface WeekPoint {
 
 export function Backtest() {
   const [model, setModel] = useState(MODELS[0])
-  // Kept short by default - the backend rebuilds the full per-game
-  // feature set with every call (no caching), so a wide range is
-  // genuinely slow (tens of seconds). Widen it deliberately, not as the
+  // Kept short by default - a range never scored before still rebuilds
+  // the full per-game feature set (tens of seconds), even though the
+  // backend now caches that result per (model, range) so every repeat
+  // visit after the first is instant. Widen it deliberately, not as the
   // default someone waits on before seeing anything.
   const [start, setStart] = useState(localIsoDaysAgo(7))
   const [end, setEnd] = useState(localIsoDaysAgo(0))
@@ -30,8 +31,8 @@ export function Backtest() {
   const [trendLoading, setTrendLoading] = useState(false)
   const [trendRequested, setTrendRequested] = useState(false)
 
-  useEffect(() => {
-    if (start >= end) return
+  function runBacktest(refresh = false) {
+    if (start >= end) return () => {}
     let cancelled = false
     setLoading(true)
     setError(null)
@@ -39,7 +40,7 @@ export function Backtest() {
     setTrendRequested(false)
 
     api
-      .backtestResults(model, `${start},${end}`)
+      .backtestResults(model, `${start},${end}`, refresh)
       .then((result) => !cancelled && setOverall(result))
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof Error ? err.message : `Backtest failed - is '${model}' trained yet?`)
@@ -49,6 +50,11 @@ export function Backtest() {
     return () => {
       cancelled = true
     }
+  }
+
+  useEffect(() => {
+    return runBacktest(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, start, end])
 
   function loadTrend() {
@@ -117,11 +123,20 @@ export function Backtest() {
         />
       </div>
 
-      {loading && <LoadingState label="Scoring the model against this range - rebuilding features for every game, so this can take a few seconds…" />}
+      {loading && <LoadingState label="Scoring the model against this range - cached after the first run for this exact range, so repeat visits are instant…" />}
       {!loading && error && <ErrorState message={error} />}
 
       {!loading && !error && overall && (
         <>
+          <div className="flex items-center justify-between mb-3 text-xs text-[color:var(--color-ink-faint)]">
+            <span>{overall.computed_at ? `Computed ${new Date(overall.computed_at).toLocaleString()}` : ''}</span>
+            <button
+              onClick={() => runBacktest(true)}
+              className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface-card)] px-3 py-1.5 font-medium hover:border-[color:var(--color-home)]/50 transition-colors"
+            >
+              Refresh
+            </button>
+          </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
             <MetricCard label="Accuracy" value={pct(overall.accuracy)} />
             <MetricCard label="Log loss" value={num(overall.log_loss)} />

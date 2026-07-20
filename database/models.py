@@ -21,6 +21,7 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -243,6 +244,8 @@ class Prediction(Base):
         # required for the Model Comparison page's blended view, which
         # needs both models' predictions for the same game at once.
         UniqueConstraint("game_id", "target_type", "model_name", name="uq_prediction_game_target_model"),
+        Index("ix_predictions_game_target_created", "game_id", "target_type", "created_at"),
+        Index("ix_predictions_target_created", "target_type", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -250,8 +253,18 @@ class Prediction(Base):
     model_name: Mapped[str] = mapped_column(String(50))
     model_version: Mapped[str] = mapped_column(String(50))
     target_type: Mapped[str] = mapped_column(String(30))
-    predicted_value: Mapped[float] = mapped_column(Float, nullable=True)
-    predicted_probability: Mapped[float] = mapped_column(Float, nullable=True)
+    predicted_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    predicted_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    predicted_side: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    predicted_home_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    predicted_away_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    home_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    away_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_home_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_away_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    actual_outcome: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    target_unit: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
 
 
@@ -277,3 +290,43 @@ class ApiCallLog(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     api_name: Mapped[str] = mapped_column(String(50), index=True)
     called_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), index=True)
+
+
+class GameFeatureCache(Base):
+    """Cached result of `build_game_feature_row` for one game - that
+    function does several DB queries plus (for the two live-Statcast
+    features) real network calls, so re-running it on every single
+    /games/{id}/features request made the Game Detail page's feature tab
+    noticeably slow even after the per-season Statcast caches are warm.
+    Served straight from here until a caller explicitly asks for
+    `?refresh=true` (see api/routers/games.py) - a completed game's
+    features never change, and a scheduled game's are cheap to
+    intentionally refresh, but not worth recomputing on every page view."""
+
+    __tablename__ = "game_feature_cache"
+
+    game_id: Mapped[int] = mapped_column(ForeignKey("games.id"), primary_key=True)
+    features_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    computed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+
+
+class BacktestCache(Base):
+    """Cached result of `run_backtest(model, start_date, end_date)` - a
+    backtest rebuilds the full feature set for every game in the range
+    from scratch, which is genuinely slow (tens of seconds), and the
+    Backtest/Model Comparison pages were re-paying that cost on every
+    identical repeat query. A finished date range's backtest result is
+    deterministic until the model is retrained, so it's safe to serve
+    from here until a caller asks for `?refresh=true`."""
+
+    __tablename__ = "backtest_cache"
+    __table_args__ = (
+        UniqueConstraint("model_name", "start_date", "end_date", name="uq_backtest_cache_model_range"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    model_name: Mapped[str] = mapped_column(String(100), index=True)
+    start_date: Mapped[dt.date] = mapped_column(Date)
+    end_date: Mapped[dt.date] = mapped_column(Date)
+    result_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    computed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))

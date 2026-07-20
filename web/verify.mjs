@@ -6,6 +6,8 @@ const pages = [
   { path: '/previous-games', name: 'previous-games' },
   { path: '/backtest', name: 'backtest' },
   { path: '/compare', name: 'compare' },
+  { path: '/roi', name: 'roi' },
+  { path: '/models', name: 'models' },
 ]
 
 const browser = await chromium.launch()
@@ -22,9 +24,12 @@ for (const p of pages) {
   // /backtest and /compare both trigger a live backtest run server-side
   // (full feature rebuild per game) - the default 30s nav timeout is too
   // tight for that even with the umpire/pitcher Statcast season caches
-  // warm, so give those two more room. The page itself shows a loading
-  // state well within 30s; this is purely the test's own patience.
-  const timeout = p.path === '/backtest' || p.path === '/compare' ? 60000 : 30000
+  // warm, so give those two more room. /roi is the same call repeated
+  // per season (two full seasons' worth of games, not a 7-day slice),
+  // uncached the first time this exact range is ever requested, so it
+  // gets the longest allowance. The page itself shows a loading state
+  // well within these timeouts; this is purely the test's own patience.
+  const timeout = p.path === '/roi' ? 180000 : p.path === '/backtest' || p.path === '/compare' ? 60000 : 30000
   await page.goto(base + p.path, { waitUntil: 'networkidle', timeout })
   await page.waitForTimeout(1500)
   await page.screenshot({ path: `verify_${p.name}.png`, fullPage: true })
@@ -39,13 +44,22 @@ if (await firstCard.count()) {
   errors.length = 0
   await firstCard.click()
   await page.waitForURL(/\/games\/\d+/)
-  // /games/{id}/features runs live Statcast/umpire lookups server-side -
-  // slow (tens of seconds), so wait for real content, not a fixed delay.
-  await page.getByText('expected win %').first().waitFor({ timeout: 45000 })
-  await page.getByText('Predictions', { exact: true }).waitFor({ timeout: 45000 })
+  // Predictions tab is already-computed DB data - should render fast now
+  // that it no longer waits on the Feature breakdown tab's live fetch.
+  await page.getByText('expected win %').first().waitFor({ timeout: 10000 })
+  await page.getByText('Predictions', { exact: true }).waitFor({ timeout: 10000 })
   await page.waitForTimeout(500)
   await page.screenshot({ path: 'verify_game-detail.png', fullPage: true })
   console.log(`game-detail -> errors: ${errors.length ? errors.join(' | ') : 'none'}`)
+
+  // Feature breakdown is fetched lazily only once this tab is opened -
+  // first click can be slow (live Statcast), so wait for real content.
+  errors.length = 0
+  await page.getByRole('button', { name: 'Feature breakdown' }).click()
+  await page.getByText('Starter').first().waitFor({ timeout: 45000 })
+  await page.waitForTimeout(500)
+  await page.screenshot({ path: 'verify_game-detail-features.png', fullPage: true })
+  console.log(`game-detail feature-breakdown -> errors: ${errors.length ? errors.join(' | ') : 'none'}`)
 } else {
   console.log('game-detail -> SKIPPED: no game cards found on slate')
 }

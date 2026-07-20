@@ -1,15 +1,40 @@
-"""POST /models/retrain (Section 8) - admin-only, triggers a retraining job."""
+"""GET /models (list) and POST /models/retrain (Section 8) - the latter
+admin-only, triggers a retraining job."""
 from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from api.schemas import RetrainRequest, RetrainResponse
+from api.schemas import ModelInfoOut, RetrainRequest, RetrainResponse
 from config import settings
+from database.db import get_db
+from database.models import ModelRegistryEntry
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/models", tags=["models"])
+
+
+@router.get("", response_model=list[ModelInfoOut])
+def list_models(db: Session = Depends(get_db)):
+    """Latest registered version of every trained model family, with its
+    held-out test metrics - backs the dashboard's Models info page."""
+    rows = db.execute(select(ModelRegistryEntry).order_by(ModelRegistryEntry.trained_at.desc())).scalars().all()
+    latest_by_name: dict[str, ModelRegistryEntry] = {}
+    for row in rows:
+        latest_by_name.setdefault(row.model_name, row)
+    return [
+        ModelInfoOut(
+            model_name=entry.model_name,
+            target_type=entry.target_type,
+            version=entry.version,
+            trained_at=entry.trained_at,
+            metrics=entry.metrics_json,
+        )
+        for entry in latest_by_name.values()
+    ]
 
 _TRAIN_RUNNERS = {}  # populated lazily below to avoid importing heavy training deps at API startup
 

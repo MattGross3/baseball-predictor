@@ -129,6 +129,17 @@ def run_backtest(db: Session, model_name: str, start_date: dt.date, end_date: dt
         y_prob = model.predict_proba(X)[:, 1]
         result.update(classification_metrics(df["label"], y_prob))
 
+        # Raw win/loss counts, not just accuracy - lets a caller show a
+        # record (e.g. "61-45") or compute a rate of return without odds,
+        # which the ROI tab needs as a fallback for stretches with no
+        # odds_snapshots coverage (see api/routers/backtest.py's
+        # /backtest/roi).
+        pred_label = (y_prob >= 0.5).astype(int)
+        actual_label = df["label"].to_numpy()
+        result["n_games"] = len(df)
+        result["wins"] = int((pred_label == actual_label).sum())
+        result["losses"] = result["n_games"] - result["wins"]
+
         if target == "moneyline":
             bet_sim = _simulate_moneyline_bets(db, df, y_prob)
             result["roi_flat_bet"] = bet_sim["roi_flat_bet"]

@@ -1,6 +1,5 @@
 import { Link } from 'react-router-dom'
-import type { Game, Prediction } from '../api/types'
-import { preferredPrediction } from '../lib/predictions'
+import type { Game, GameSlateSummary } from '../api/types'
 import { TeamBadge } from './TeamBadge'
 
 const statusStyle: Record<string, string> = {
@@ -22,16 +21,34 @@ function scoreLabel(game: Game): string {
   return `Final: ${game.away_team.abbreviation} ${game.away_score} - ${game.home_team.abbreviation} ${game.home_score}`
 }
 
-interface Props {
-  game: Game
-  predictions: Prediction[]
+function americanOdds(n: number | null | undefined): string {
+  if (n == null) return '—'
+  return n > 0 ? `+${n}` : `${n}`
 }
 
-export function GameRow({ game, predictions }: Props) {
-  const moneyline = preferredPrediction(predictions, 'moneyline')
-  const total = preferredPrediction(predictions, 'total')
-  const nrfi = preferredPrediction(predictions, 'nrfi')
-  const homeProb = moneyline?.predicted_probability ?? null
+interface Props {
+  game: Game
+  summary?: GameSlateSummary
+}
+
+export function GameRow({ game, summary }: Props) {
+  const homeProb = summary?.moneyline_probability ?? null
+  const totalSplit = summary?.total_home_prediction != null && summary?.total_away_prediction != null
+    ? `${game.home_team.abbreviation} ${summary.total_home_prediction.toFixed(1)} · ${game.away_team.abbreviation} ${summary.total_away_prediction.toFixed(1)}`
+    : summary?.total_prediction != null
+      ? summary.total_prediction.toFixed(1)
+      : '—'
+  const recommendation = summary?.pick_type && summary.pick_side ? `${summary.pick_type.toUpperCase()} ${summary.pick_side.toUpperCase()}` : '—'
+  const confidence = summary?.confidence != null ? `${Math.round(summary.confidence * 100)}%` : '—'
+
+  const odds = summary?.latest_odds ?? null
+  const moneylineValue = odds ? `${americanOdds(odds.moneyline_home)} / ${americanOdds(odds.moneyline_away)}` : '—'
+  const spreadValue = odds?.run_line != null
+    ? `${game.home_team.abbreviation} ${odds.run_line > 0 ? `+${odds.run_line}` : odds.run_line} (${americanOdds(odds.run_line_odds)})`
+    : '—'
+  const totalOddsValue = odds?.total != null
+    ? `${odds.total} (O ${americanOdds(odds.over_odds)} / U ${americanOdds(odds.under_odds)})`
+    : '—'
 
   return (
     <div className="rounded-xl border border-[color:var(--color-border)] bg-[color:var(--color-surface-card)] px-6 py-4 flex flex-wrap items-center gap-6 hover:shadow-sm transition-shadow">
@@ -52,8 +69,12 @@ export function GameRow({ game, predictions }: Props) {
       <div className="flex-1 flex flex-wrap items-center gap-x-8 gap-y-2">
         <Stat label={`${game.home_team.abbreviation} WIN %`} value={homeProb != null ? `${Math.round(homeProb * 100)}%` : '—'} />
         <Stat label={`${game.away_team.abbreviation} WIN %`} value={homeProb != null ? `${Math.round((1 - homeProb) * 100)}%` : '—'} />
-        <Stat label="PREDICTED TOTAL" value={total?.predicted_value != null ? total.predicted_value.toFixed(1) : '—'} />
-        <Stat label="NRFI %" value={nrfi?.predicted_probability != null ? `${Math.round(nrfi.predicted_probability * 100)}%` : '—'} />
+        <Stat label="TOTAL SPLIT" value={totalSplit} />
+        <Stat label="RECOMMENDATION" value={recommendation} />
+        <Stat label="EDGE CONFIDENCE" value={confidence} />
+        <Stat label="MONEYLINE (H/A)" value={moneylineValue} />
+        <Stat label={`SPREAD (${game.home_team.abbreviation})`} value={spreadValue} />
+        <Stat label="TOTAL ODDS" value={totalOddsValue} />
       </div>
 
       <Link to={`/games/${game.id}`} className="text-sm font-medium text-[color:var(--color-home)] hover:underline whitespace-nowrap">

@@ -2,6 +2,7 @@ import datetime as dt
 
 import pandas as pd
 
+from api.schemas import PredictionOut
 from models.model_utils import classification_metrics, date_split, feature_columns, regression_metrics
 
 
@@ -68,3 +69,37 @@ class TestRegressionMetrics:
     def test_mae_matches_hand_calculation(self):
         m = regression_metrics([4, 6], [5, 5])
         assert m["mae"] == 1.0
+
+
+class TestPredictionSchema:
+    def test_exposes_richer_prediction_fields(self):
+        payload = PredictionOut.model_validate(
+            {
+                "id": 1,
+                "game_id": 2,
+                "model_name": "moneyline_xgboost",
+                "model_version": "moneyline_xgboost_v1",
+                "target_type": "moneyline",
+                "predicted_value": 4.5,
+                "predicted_probability": 0.62,
+                "predicted_side": "home",
+                "home_probability": 0.62,
+                "away_probability": 0.38,
+                "market_home_probability": 0.58,
+                "market_away_probability": 0.42,
+                "confidence": 0.12,
+                "actual_outcome": "home_win",
+                "target_unit": "win_probability",
+                "created_at": "2026-07-20T12:00:00+00:00",
+            }
+        )
+
+        data = payload.model_dump()
+        assert data["predicted_side"] == "home"
+        assert data["home_probability"] == 0.62
+        assert data["away_probability"] == 0.38
+        assert data["market_home_probability"] == 0.58
+        assert data["market_away_probability"] == 0.42
+        assert data["confidence"] == 0.12
+        assert data["actual_outcome"] == "home_win"
+        assert data["target_unit"] == "win_probability"

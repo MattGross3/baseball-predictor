@@ -5,6 +5,8 @@ const navItems = [
   { to: '/previous-games', label: 'Previous Games' },
   { to: '/backtest', label: 'Backtest' },
   { to: '/compare', label: 'Model Comparison' },
+  { to: '/roi', label: 'ROI' },
+  { to: '/models', label: 'Models' },
 ]
 
 export function Layout() {

@@ -1,4 +1,4 @@
-import type { BacktestResult, Game, GameFeaturesResponse, GamePredictions, Prediction } from './types'
+import type { BacktestResult, Game, GameFeaturesResponse, GamePredictions, GameSlateSummary, ModelInfo, Prediction } from './types'
 
 // In dev, Vite proxies /api/* to the FastAPI backend (see vite.config.ts) -
 // same trick nginx.conf uses in production (see web/Dockerfile). Neither
@@ -31,13 +31,17 @@ async function get<T>(path: string, params?: Record<string, string | undefined>)
 
 export const api = {
   gamesToday: (date?: string) => get<Game[]>('/games/today', { date }),
+  getGameSlateSummary: (date?: string) => get<GameSlateSummary[]>('/games/today/summary', { date }),
   getGame: (id: number) => get<Game>(`/games/${id}`),
-  getGameFeatures: (id: number) => get<GameFeaturesResponse>(`/games/${id}/features`),
+  getGameFeatures: (id: number, refresh?: boolean) =>
+    get<GameFeaturesResponse>(`/games/${id}/features`, refresh ? { refresh: 'true' } : undefined),
   getGamePredictions: (id: number) => get<GamePredictions>(`/games/${id}/predictions`),
   predictionHistory: (dateRange: string, targetType?: string) =>
     get<Prediction[]>('/predictions/history', { date_range: dateRange, target_type: targetType }),
-  backtestResults: (model: string, dateRange: string) =>
-    get<BacktestResult>('/backtest/results', { model, date_range: dateRange }),
+  backtestResults: (model: string, dateRange: string, refresh?: boolean) =>
+    get<BacktestResult>('/backtest/results', { model, date_range: dateRange, refresh: refresh ? 'true' : undefined }),
+  backtestSeasons: () => get<number[]>('/backtest/seasons'),
+  listModels: () => get<ModelInfo[]>('/models'),
 }
 
 export { ApiError }

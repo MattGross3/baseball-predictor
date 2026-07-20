@@ -3,7 +3,9 @@ import { Layout } from './components/Layout'
 import { Backtest } from './pages/Backtest'
 import { GameDetail } from './pages/GameDetail'
 import { ModelComparison } from './pages/ModelComparison'
+import { Models } from './pages/Models'
 import { PreviousGames } from './pages/PreviousGames'
+import { ROI } from './pages/ROI'
 import { TodaySlate } from './pages/TodaySlate'
 
 function App() {
@@ -15,6 +17,8 @@ function App() {
         <Route path="previous-games" element={<PreviousGames />} />
         <Route path="backtest" element={<Backtest />} />
         <Route path="compare" element={<ModelComparison />} />
+        <Route path="roi" element={<ROI />} />
+        <Route path="models" element={<Models />} />
       </Route>
     </Routes>
   )

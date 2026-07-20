@@ -11,6 +11,7 @@ import datetime as dt
 import json
 import logging
 import pickle
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -100,9 +101,14 @@ def save_model(db: Session, model, model_name: str, target_type: str, version: s
     return path
 
 
-def load_model(path: str | Path) -> dict:
+@lru_cache(maxsize=32)
+def _load_model_cached(path: str) -> dict:
     with Path(path).open("rb") as f:
         return pickle.load(f)
+
+
+def load_model(path: str | Path) -> dict:
+    return _load_model_cached(str(path))
 
 
 def next_version(db: Session, model_name: str) -> str:

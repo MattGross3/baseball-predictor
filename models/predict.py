@@ -12,10 +12,11 @@ import datetime as dt
 import logging
 
 import pandas as pd
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from database.models import Game, ModelRegistryEntry, Prediction
+from database.models import Game, GameFeatureCache, ModelRegistryEntry, Prediction
 from features.build_feature_matrix import build_game_feature_row, flatten_feature_row
 from models.model_utils import load_model
 
@@ -48,7 +49,25 @@ def _pick_model(db: Session, target: str) -> ModelRegistryEntry | None:
     return None
 
 
-def _score_with_model(entry: ModelRegistryEntry, target: str, nested: dict) -> tuple[float | None, float | None]:
+def _cached_feature_row(db: Session, game_id: int, include_statcast_trend: bool = True, include_live_oaa: bool | None = None) -> dict:
+    """Serve a cached feature row for a game when possible, and write it back
+    to `game_feature_cache` the first time we have to build it. This cuts the
+    repeat cost of a full feature build across multiple model calls."""
+    cached = db.get(GameFeatureCache, game_id)
+    if cached is not None:
+        return cached.features_json
+
+    nested = build_game_feature_row(db, game_id, include_statcast_trend=include_statcast_trend, include_live_oaa=include_live_oaa)
+    if cached is None:
+        cached = GameFeatureCache(game_id=game_id)
+        db.add(cached)
+    cached.features_json = jsonable_encoder(nested)
+    cached.computed_at = dt.datetime.now(dt.timezone.utc)
+    db.flush()
+    return nested
+
+
+def _score_with_model(entry: ModelRegistryEntry, target: str, nested: dict) -> tuple[float | None, float | None, float | None, float | None]:
     """Runs one already-loaded model bundle against an already-built
     feature row. Split out from generate_prediction so multiple models can
     share one (expensive) feature build - see generate_all_model_predictions."""
@@ -61,16 +80,26 @@ def _score_with_model(entry: ModelRegistryEntry, target: str, nested: dict) -> t
     X = X.apply(pd.to_numeric, errors="coerce").fillna(0).astype(float)
 
     if target in ("moneyline", "nrfi"):
-        return None, float(model.predict_proba(X)[:, 1][0])
+        return None, float(model.predict_proba(X)[:, 1][0]), None, None
 
     # total - same compound-model dispatch as backtest_engine.run_backtest
     from models.train_totals import poisson_run_distribution, xgb_run_distribution
 
     dist = poisson_run_distribution(model, X) if ("home" in model and "away" in model) else xgb_run_distribution(model, X)
-    return dist["mean"], None
+    return dist["mean"], None, dist.get("lambda_home"), dist.get("lambda_away")
 
 
-def _upsert_prediction(db: Session, game_id: int, target: str, entry: ModelRegistryEntry, predicted_value: float | None, predicted_probability: float | None) -> Prediction:
+def _upsert_prediction(
+    db: Session,
+    game_id: int,
+    target: str,
+    entry: ModelRegistryEntry,
+    predicted_value: float | None,
+    predicted_probability: float | None,
+    predicted_home_value: float | None = None,
+    predicted_away_value: float | None = None,
+    nested: dict | None = None,
+) -> Prediction:
     # Upsert on (game_id, target_type, model_name) - a given model family
     # predicts a game once and is served from that stored row from then on;
     # calling this again for the *same* model (e.g. the scheduler's pregame
@@ -87,9 +116,42 @@ def _upsert_prediction(db: Session, game_id: int, target: str, entry: ModelRegis
         prediction = Prediction(game_id=game_id, target_type=target, model_name=entry.model_name)
         db.add(prediction)
 
+    game = db.get(Game, game_id)
+    home_prob = None
+    away_prob = None
+    market_home = nested.get("market_implied_probability_home") if nested is not None else None
+    market_away = nested.get("market_implied_probability_away") if nested is not None else None
+
+    if predicted_probability is not None:
+        home_prob = round(predicted_probability, 6)
+        away_prob = round(1.0 - predicted_probability, 6)
+
     prediction.model_version = f"{entry.model_name}_{entry.version}"
     prediction.predicted_value = predicted_value
     prediction.predicted_probability = predicted_probability
+    prediction.predicted_side = "home" if (predicted_probability is not None and predicted_probability >= 0.5) else "away" if predicted_probability is not None else None
+    prediction.predicted_home_value = predicted_home_value
+    prediction.predicted_away_value = predicted_away_value
+    prediction.home_probability = home_prob
+    prediction.away_probability = away_prob
+    prediction.market_home_probability = market_home
+    prediction.market_away_probability = market_away
+    prediction.confidence = round(abs((predicted_probability or 0.5) - 0.5) * 2, 6) if predicted_probability is not None else None
+    prediction.target_unit = {
+        "moneyline": "win_probability",
+        "nrfi": "win_probability",
+        "total": "runs",
+    }.get(target, None)
+
+    if game is not None and game.status == "final":
+        if target == "moneyline":
+            prediction.actual_outcome = "home_win" if game.home_score is not None and game.away_score is not None and game.home_score > game.away_score else "away_win" if game.home_score is not None and game.away_score is not None else None
+        elif target == "nrfi":
+            if game.first_inning_home_runs is not None and game.first_inning_away_runs is not None:
+                prediction.actual_outcome = "nrfi" if game.first_inning_home_runs == 0 and game.first_inning_away_runs == 0 else "yrfi"
+        else:
+            prediction.actual_outcome = None
+
     prediction.created_at = dt.datetime.now(dt.timezone.utc)
     db.flush()
     return prediction
@@ -118,9 +180,9 @@ def generate_prediction(db: Session, game_id: int, target: str, include_statcast
     if db.get(Game, game_id) is None:
         raise ValueError(f"No game with id={game_id}")
 
-    nested = build_game_feature_row(db, game_id, include_statcast_trend=include_statcast_trend)
-    value, prob = _score_with_model(entry, target, nested)
-    return _upsert_prediction(db, game_id, target, entry, value, prob)
+    nested = _cached_feature_row(db, game_id, include_statcast_trend=include_statcast_trend)
+    value, prob, home_value, away_value = _score_with_model(entry, target, nested)
+    return _upsert_prediction(db, game_id, target, entry, value, prob, predicted_home_value=home_value, predicted_away_value=away_value, nested=nested)
 
 
 def generate_all_model_predictions(db: Session, game_id: int, target: str, include_statcast_trend: bool = True) -> list[Prediction]:
@@ -140,12 +202,12 @@ def generate_all_model_predictions(db: Session, game_id: int, target: str, inclu
     if db.get(Game, game_id) is None:
         raise ValueError(f"No game with id={game_id}")
 
-    nested = build_game_feature_row(db, game_id, include_statcast_trend=include_statcast_trend)
+    nested = _cached_feature_row(db, game_id, include_statcast_trend=include_statcast_trend)
 
     predictions = []
     for entry in entries:
-        value, prob = _score_with_model(entry, target, nested)
-        predictions.append(_upsert_prediction(db, game_id, target, entry, value, prob))
+        value, prob, home_value, away_value = _score_with_model(entry, target, nested)
+        predictions.append(_upsert_prediction(db, game_id, target, entry, value, prob, predicted_home_value=home_value, predicted_away_value=away_value, nested=nested))
     return predictions
 
 

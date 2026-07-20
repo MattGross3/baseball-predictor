@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError } from '../api/client'
-import type { Game, Prediction } from '../api/types'
+import type { Game, GameSlateSummary } from '../api/types'
 import { GameRow } from '../components/GameRow'
 import { localIsoDate } from '../lib/date'
 import { EmptyState, ErrorState, LoadingState } from '../components/States'
@@ -8,7 +8,7 @@ import { EmptyState, ErrorState, LoadingState } from '../components/States'
 export function TodaySlate() {
   const [date, setDate] = useState(() => localIsoDate(new Date()))
   const [games, setGames] = useState<Game[] | null>(null)
-  const [predictionsByGame, setPredictionsByGame] = useState<Record<number, Prediction[]>>({})
+  const [summaries, setSummaries] = useState<Record<number, GameSlateSummary>>({})
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -17,23 +17,14 @@ export function TodaySlate() {
     setLoading(true)
     setError(null)
 
-    api
-      .gamesToday(date)
-      .then(async (fetchedGames) => {
+    Promise.all([
+      api.gamesToday(date),
+      api.getGameSlateSummary(date),
+    ])
+      .then(([fetchedGames, fetchedSummaries]) => {
         if (cancelled) return
         setGames(fetchedGames)
-
-        const entries = await Promise.all(
-          fetchedGames.map(async (g) => {
-            try {
-              const res = await api.getGamePredictions(g.id)
-              return [g.id, res.predictions] as const
-            } catch {
-              return [g.id, []] as const
-            }
-          }),
-        )
-        if (!cancelled) setPredictionsByGame(Object.fromEntries(entries))
+        setSummaries(Object.fromEntries(fetchedSummaries.map((summary) => [summary.game_id, summary])))
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -71,7 +62,7 @@ export function TodaySlate() {
       {!loading && !error && games && games.length > 0 && (
         <div className="flex flex-col gap-3">
           {games.map((game) => (
-            <GameRow key={game.id} game={game} predictions={predictionsByGame[game.id] ?? []} />
+            <GameRow key={game.id} game={game} summary={summaries[game.id]} />
           ))}
         </div>
       )}

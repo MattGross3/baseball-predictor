@@ -17,6 +17,7 @@ it, and the field is `None` if you call this standalone without one.
 from __future__ import annotations
 
 import datetime as dt
+import threading
 from functools import lru_cache
 
 import pandas as pd
@@ -120,8 +121,27 @@ def compute_starter_features(
     }
 
 
+# Per-(pitcher, season) locks, not one global lock - unlike the umpire
+# league-wide pull (effectively one active season at a time),
+# game-detail/backtest requests for many different games can legitimately
+# want many different pitchers concurrently, and serializing all of them
+# behind a single lock would just recreate the slowness this cache exists
+# to avoid. A per-key lock still prevents the specific failure mode this
+# guards against: two threads racing on the *same* uncached pitcher both
+# firing their own fetch instead of one waiting for the other's result
+# (see ingestion.umpire_scorecards._season_league_pitches_lock, where
+# that race turned a ~90s request into a 12-minute one).
+_pitcher_pitches_locks: dict[tuple[int, int], threading.Lock] = {}
+_pitcher_pitches_locks_guard = threading.Lock()
+
+
+def _pitcher_pitches_lock(key: tuple[int, int]) -> threading.Lock:
+    with _pitcher_pitches_locks_guard:
+        return _pitcher_pitches_locks.setdefault(key, threading.Lock())
+
+
 @lru_cache(maxsize=512)
-def _season_pitcher_pitches(pitcher_mlb_id: int, season: int):
+def _season_pitcher_pitches_uncached(pitcher_mlb_id: int, season: int):
     """Whole-season Statcast pitch log for one pitcher, fetched once and
     cached in-process - reused for every start of theirs in a build
     instead of 2 fresh, narrow, shifting-window fetches per start (the
@@ -137,7 +157,8 @@ def _season_pitcher_pitches(pitcher_mlb_id: int, season: int):
     instead of the pitcher's actual MLB Advanced Media id - Statcast
     always returned zero pitches for that bogus id, so `velo_trend_last_3`
     was silently None even on the "live, full-cost" path, before caching
-    was ever a factor.
+    was ever a factor. Call `_season_pitcher_pitches` (below), not this
+    directly, to get the concurrency-safe wrapper.
     """
     start = dt.date(season, *SEASON_START_MONTH_DAY)
     end = dt.date(season, 12, 31)
@@ -145,6 +166,11 @@ def _season_pitcher_pitches(pitcher_mlb_id: int, season: int):
         return fetch_pitcher_statcast(pitcher_mlb_id, start, end)
     except Exception:
         return pd.DataFrame()
+
+
+def _season_pitcher_pitches(pitcher_mlb_id: int, season: int):
+    with _pitcher_pitches_lock((pitcher_mlb_id, season)):
+        return _season_pitcher_pitches_uncached(pitcher_mlb_id, season)
 
 
 def _velo_trend_last_3(player: Player, as_of_date: dt.date, starts) -> float | None:
