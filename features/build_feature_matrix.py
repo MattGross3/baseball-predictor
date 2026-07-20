@@ -40,17 +40,32 @@ _EMPTY_STARTER = {
     "velo_trend_last_3": None, "days_rest": None, "pitch_count_last_start": None,
     "home_away_split_era": {"home": None, "away": None},
     "vs_opponent_career_era": None, "handedness": None,
+    "fastball_pct": None, "breaking_pct": None, "offspeed_pct": None,
 }
 
 # Scalar fields pulled straight into the model matrix from each feature
-# dict. List/dict-valued fields (pitch_mix, hot_streak_players, home/away
-# splits) are kept in the nested `build_game_feature_row` output for the
-# API's explain view but intentionally left out of the flat training
-# matrix - they're not directly usable by sklearn/XGBoost without further
-# encoding, which is future work, not this pass.
+# dict. Most list/dict-valued fields (hot_streak_players, home/away splits)
+# are kept in the nested `build_game_feature_row` output for the API's
+# explain view but left out of the flat training matrix - not directly
+# usable by sklearn/XGBoost without further encoding. pitch_mix is a
+# partial exception: features/pitcher_features.py buckets it into three
+# scalar percentages (fastball/breaking/offspeed), but only two of the
+# three (fastball, breaking) flow into the matrix below - the raw
+# per-pitch-type dict and primary_pitch_type string stay excluded either
+# way. offspeed_pct is deliberately dropped here, not an oversight: the
+# three buckets always sum to ~100 (confirmed empirically: mean 99.95,
+# std 0.24 across a real sample), so including all three handed the
+# totals_poisson GLM an exact linear dependency - it blew up (MAE went
+# from ~3.8 to over 1000, with a real "invalid value encountered in
+# divide" warning during training) the one time this was tried with all
+# three included. fastball_pct and breaking_pct alone already carry
+# everything offspeed_pct would (100 - fastball - breaking recovers it),
+# without the collinearity - the same fix as dropping one level of a
+# one-hot-encoded category to avoid the dummy-variable trap.
 _STARTER_SCALAR_FIELDS = [
     "era_season", "fip_season", "era_last_3_starts", "k_pct_rolling", "bb_pct_rolling",
     "velo_trend_last_3", "days_rest", "pitch_count_last_start", "vs_opponent_career_era",
+    "fastball_pct", "breaking_pct",
 ]
 _BULLPEN_SCALAR_FIELDS = ["bullpen_era_rolling_7d", "bullpen_era_rolling_14d", "innings_thrown_last_3_games"]
 _TEAM_SCALAR_FIELDS = ["win_pct_season", "win_pct_last_10", "run_diff_season", "pythag_win_pct", "oaa_defense_rating"]
@@ -234,6 +249,11 @@ def flatten_feature_row(nested: dict) -> dict:
         ("k_pct_rolling", "home_starter_k_pct_rolling", "away_starter_k_pct_rolling"),
         ("bb_pct_rolling", "home_starter_bb_pct_rolling", "away_starter_bb_pct_rolling"),
         ("days_rest", "home_starter_days_rest", "away_starter_days_rest"),
+        ("fastball_pct", "home_starter_fastball_pct", "away_starter_fastball_pct"),
+        ("breaking_pct", "home_starter_breaking_pct", "away_starter_breaking_pct"),
+        # No diff_offspeed_pct - offspeed_pct itself isn't in
+        # _STARTER_SCALAR_FIELDS (see the comment there), so there's
+        # nothing to diff.
         ("bullpen_era_7d", "home_bullpen_bullpen_era_rolling_7d", "away_bullpen_bullpen_era_rolling_7d"),
         ("win_pct_season", "home_team_win_pct_season", "away_team_win_pct_season"),
         ("win_pct_last_10", "home_team_win_pct_last_10", "away_team_win_pct_last_10"),

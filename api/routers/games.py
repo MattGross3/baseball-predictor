@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from api.schemas import GameFeaturesOut, GameOut, GamePredictionsOut, GameSlateSummaryOut, OddsOut, PredictionOut
-from backtest.clv_tracker import american_to_implied_prob
+from backtest.clv_tracker import american_to_implied_prob, devig_two_way
 from database.db import get_db
 from database.models import Game, GameFeatureCache, OddsSnapshot, Player, Prediction
 from features.build_feature_matrix import build_game_feature_row
@@ -105,6 +105,28 @@ def get_games_today_summary(date: dt.date | None = None, db: Session = Depends(g
             (p for p in predictions if p.target_type == "total" and p.predicted_home_value is not None), None
         )
 
+        # split_source is a genuinely different model from `total` whenever
+        # the fallback above kicked in - Poisson's own combined number
+        # (predicted_home_value + predicted_away_value) doesn't necessarily
+        # match XGBoost's `total_prediction`, the number the Over/Under
+        # pick below is actually computed against. Showing Poisson's raw,
+        # unscaled split next to a pick decided by a different number the
+        # user never sees reads as a contradiction (e.g. a 7.7-run split
+        # displayed next to a highlighted "Under 9" pick that was actually
+        # decided by an invisible 8.5). Rescale the split proportionally so
+        # it always sums to exactly the headline number the pick used -
+        # this keeps Poisson's home/away *ratio* (the only real signal for
+        # how a total divides between two teams) while never displaying a
+        # split total that disagrees with the total actually driving the pick.
+        home_split, away_split = None, None
+        if split_source is not None:
+            fallback_combined = split_source.predicted_home_value + split_source.predicted_away_value
+            headline = total.predicted_value if (total and total.predicted_value is not None) else fallback_combined
+            if fallback_combined:
+                scale = headline / fallback_combined
+                home_split = round(split_source.predicted_home_value * scale, 2)
+                away_split = round(split_source.predicted_away_value * scale, 2)
+
         # Pitching matchup - include_statcast_trend=False keeps this to a
         # cheap DB aggregation (season ERA/WHIP), not a live Statcast pull;
         # fine for a per-game feature build, too slow to repeat for every
@@ -123,8 +145,8 @@ def get_games_today_summary(date: dt.date | None = None, db: Session = Depends(g
         summary = GameSlateSummaryOut(game_id=game.id)
         summary.moneyline_probability = moneyline.predicted_probability if moneyline and moneyline.predicted_probability is not None else None
         summary.total_prediction = total.predicted_value if total and total.predicted_value is not None else None
-        summary.total_home_prediction = split_source.predicted_home_value if split_source else None
-        summary.total_away_prediction = split_source.predicted_away_value if split_source else None
+        summary.total_home_prediction = home_split
+        summary.total_away_prediction = away_split
         summary.nrfi_probability = nrfi.predicted_probability if nrfi and nrfi.predicted_probability is not None else None
         summary.latest_odds = latest_odds
         summary.home_starter_name = home_starter.name if home_starter else None
@@ -140,10 +162,15 @@ def get_games_today_summary(date: dt.date | None = None, db: Session = Depends(g
         # "predicted home runs minus predicted away runs" is exactly a
         # predicted margin, directly comparable to a run line.
         if (
-            split_source is not None
+            home_split is not None and away_split is not None
             and latest_odds is not None and latest_odds.run_line is not None
         ):
-            predicted_margin = split_source.predicted_home_value - split_source.predicted_away_value
+            # Use the rescaled split (home_split/away_split), not
+            # split_source's raw values - same reasoning as the total
+            # split above, so the run-line pick is derived from the same
+            # number the Over/Under pick and displayed score use, not a
+            # third, invisible one.
+            predicted_margin = home_split - away_split
             # run_line is always the home team's own line (see
             # ingestion/odds_api._extract_best_lines) - e.g. -1.5 means home
             # is favored by 1.5, +1.5 means home is the underdog getting
@@ -155,21 +182,27 @@ def get_games_today_summary(date: dt.date | None = None, db: Session = Depends(g
             summary.run_line_edge = run_line_edge
 
         if moneyline and moneyline.predicted_probability is not None and latest_odds is not None and latest_odds.moneyline_home is not None and latest_odds.moneyline_away is not None:
-            home_implied = american_to_implied_prob(latest_odds.moneyline_home)
-            away_implied = american_to_implied_prob(latest_odds.moneyline_away)
-            if moneyline.predicted_probability >= 0.5 and (moneyline.predicted_probability - home_implied) >= 0.02:
+            # Devigged, not raw, implied probability - a book's home/away
+            # prices always sum to >100% (the vig), so comparing the
+            # model's probability to one side's raw number systematically
+            # understates the edge actually needed to beat the market.
+            home_fair, away_fair = devig_two_way(
+                american_to_implied_prob(latest_odds.moneyline_home),
+                american_to_implied_prob(latest_odds.moneyline_away),
+            )
+            if moneyline.predicted_probability >= 0.5 and (moneyline.predicted_probability - home_fair) >= 0.02:
                 summary.pick_type = "moneyline"
                 summary.pick_side = "home"
                 summary.projected_value = moneyline.predicted_probability
-                summary.market_value = home_implied
-                summary.edge = round(moneyline.predicted_probability - home_implied, 4)
+                summary.market_value = home_fair
+                summary.edge = round(moneyline.predicted_probability - home_fair, 4)
                 summary.confidence = round(abs(moneyline.predicted_probability - 0.5) * 2, 4)
-            elif (1 - moneyline.predicted_probability) >= 0.5 and ((1 - moneyline.predicted_probability) - away_implied) >= 0.02:
+            elif (1 - moneyline.predicted_probability) >= 0.5 and ((1 - moneyline.predicted_probability) - away_fair) >= 0.02:
                 summary.pick_type = "moneyline"
                 summary.pick_side = "away"
                 summary.projected_value = 1 - moneyline.predicted_probability
-                summary.market_value = away_implied
-                summary.edge = round((1 - moneyline.predicted_probability) - away_implied, 4)
+                summary.market_value = away_fair
+                summary.edge = round((1 - moneyline.predicted_probability) - away_fair, 4)
                 summary.confidence = round(abs((1 - moneyline.predicted_probability) - 0.5) * 2, 4)
 
         if summary.pick_type is None and total and total.predicted_value is not None and latest_odds is not None and latest_odds.total is not None:
@@ -229,10 +262,10 @@ def _preferred_prediction(predictions: list[Prediction], target: str) -> Predict
 
 
 def _compute_edge_vs_market(db: Session, game_id: int, predictions: list[Prediction]) -> dict | None:
-    """Model win probability vs. the market's de-vigged... actually just
-    raw implied probability (no de-vig applied) from the latest odds
-    snapshot. Returns None if there's no moneyline prediction or no odds -
-    the dashboard shows "N/A" in that case rather than a fabricated edge.
+    """Model win probability vs. the market's de-vigged fair probability
+    from the latest odds snapshot. Returns None if there's no moneyline
+    prediction or no odds for both sides - the dashboard shows "N/A" in
+    that case rather than a fabricated edge.
     """
     moneyline_pred = next((p for p in predictions if p.target_type == "moneyline"), None)
     if moneyline_pred is None or moneyline_pred.predicted_probability is None:
@@ -241,12 +274,15 @@ def _compute_edge_vs_market(db: Session, game_id: int, predictions: list[Predict
     latest_odds = db.execute(
         select(OddsSnapshot).where(OddsSnapshot.game_id == game_id).order_by(OddsSnapshot.timestamp.desc())
     ).scalars().first()
-    if latest_odds is None or latest_odds.moneyline_home is None:
+    if latest_odds is None or latest_odds.moneyline_home is None or latest_odds.moneyline_away is None:
         return None
 
-    implied = american_to_implied_prob(latest_odds.moneyline_home)
+    home_fair, _away_fair = devig_two_way(
+        american_to_implied_prob(latest_odds.moneyline_home),
+        american_to_implied_prob(latest_odds.moneyline_away),
+    )
     return {
         "model_probability_home": moneyline_pred.predicted_probability,
-        "market_implied_probability_home": round(implied, 4),
-        "edge": round(moneyline_pred.predicted_probability - implied, 4),
+        "market_implied_probability_home": round(home_fair, 4),
+        "edge": round(moneyline_pred.predicted_probability - home_fair, 4),
     }

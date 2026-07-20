@@ -32,13 +32,6 @@ function signedNumber(n: number | null | undefined): string {
 
 const COLUMN_HEADERS = ['Predicted Score / ML', 'Spread', 'Total', 'NRFI'] as const
 
-const headerColor: Record<(typeof COLUMN_HEADERS)[number], string> = {
-  'Predicted Score / ML': 'var(--color-home)',
-  Spread: 'var(--color-warning)',
-  Total: 'var(--color-good)',
-  NRFI: 'var(--color-nrfi)',
-}
-
 interface Props {
   game: Game
   summary?: GameSlateSummary
@@ -106,8 +99,7 @@ export function GameRow({ game, summary }: Props) {
                 {COLUMN_HEADERS.map((h) => (
                   <th
                     key={h}
-                    className="text-center text-[11px] font-semibold uppercase tracking-wide pb-2 px-1"
-                    style={{ color: headerColor[h] }}
+                    className="text-center text-[11px] font-semibold uppercase tracking-wide pb-2 px-1 text-[color:var(--color-ink-faint)]"
                   >
                     {h}
                   </th>
@@ -116,35 +108,31 @@ export function GameRow({ game, summary }: Props) {
             </thead>
             <tbody>
               <tr>
-                <Cell color="var(--color-home)" highlighted={false}>
+                <Cell highlighted={false}>
                   {game.away_team.abbreviation} {awayScore != null ? awayScore.toFixed(1) : '—'} {americanOdds(odds?.moneyline_away)}
                 </Cell>
-                <Cell color="var(--color-warning)" highlighted={runLinePick === 'away'}>
+                <Cell highlighted={runLinePick === 'away'}>
                   {/* Only the home side's run-line price is actually ingested (see
                       ingestion/odds_api._extract_best_lines) - showing a fabricated
                       away-side price would be dishonest, so this just omits it. */}
                   {awayRunLine != null ? signedNumber(awayRunLine) : '—'}
                 </Cell>
-                <Cell color="var(--color-good)" highlighted={totalPick === 'under'}>
+                <Cell highlighted={totalPick === 'under'}>
                   {total != null ? `U ${total} ${americanOdds(odds?.under_odds)}` : '—'}
                 </Cell>
-                <Cell color="var(--color-nrfi)" highlighted={nrfiProb != null && nrfiProb < 0.5}>
-                  No
-                </Cell>
+                <Cell highlighted={nrfiProb != null && nrfiProb < 0.5}>No</Cell>
               </tr>
               <tr>
-                <Cell color="var(--color-home)" highlighted={false}>
+                <Cell highlighted={false}>
                   {game.home_team.abbreviation} {homeScore != null ? homeScore.toFixed(1) : '—'} {americanOdds(odds?.moneyline_home)}
                 </Cell>
-                <Cell color="var(--color-warning)" highlighted={runLinePick === 'home'}>
+                <Cell highlighted={runLinePick === 'home'}>
                   {homeRunLine != null ? `${signedNumber(homeRunLine)} (${americanOdds(odds?.run_line_odds)})` : '—'}
                 </Cell>
-                <Cell color="var(--color-good)" highlighted={totalPick === 'over'}>
+                <Cell highlighted={totalPick === 'over'}>
                   {total != null ? `O ${total} ${americanOdds(odds?.over_odds)}` : '—'}
                 </Cell>
-                <Cell color="var(--color-nrfi)" highlighted={nrfiProb != null && nrfiProb >= 0.5}>
-                  Yes
-                </Cell>
+                <Cell highlighted={nrfiProb != null && nrfiProb >= 0.5}>Yes</Cell>
               </tr>
             </tbody>
           </table>
@@ -152,7 +140,7 @@ export function GameRow({ game, summary }: Props) {
 
         <Link
           to={`/games/${game.id}`}
-          className="text-xs font-medium text-[color:var(--color-home)] hover:underline whitespace-nowrap shrink-0 pt-1"
+          className="text-xs font-medium text-[color:var(--color-ink-muted)] hover:text-[color:var(--color-ink)] hover:underline whitespace-nowrap shrink-0 pt-1"
         >
           View detail →
         </Link>
@@ -165,16 +153,13 @@ export function GameRow({ game, summary }: Props) {
   )
 }
 
-function Cell({ color, highlighted, children }: { color: string; highlighted: boolean; children: React.ReactNode }) {
+function Cell({ highlighted, children }: { highlighted: boolean; children: React.ReactNode }) {
   return (
     <td className="px-1 py-1.5">
       <div
-        className="rounded-lg text-center font-semibold text-xs py-1.5 px-2 whitespace-nowrap"
-        style={{
-          color,
-          background: `color-mix(in srgb, ${color} 12%, transparent)`,
-          border: `1.5px solid ${highlighted ? color : 'transparent'}`,
-        }}
+        className={`rounded-lg text-center font-semibold text-xs py-1.5 px-2 whitespace-nowrap bg-[color:var(--color-surface-raised)] text-[color:var(--color-ink)] border ${
+          highlighted ? 'border-[color:var(--color-ink)]' : 'border-transparent'
+        }`}
       >
         {children}
       </div>

@@ -26,6 +26,29 @@ def american_to_implied_prob(odds: int) -> float:
     return 100 / (odds + 100) if odds > 0 else abs(odds) / (abs(odds) + 100)
 
 
+def devig_two_way(implied_home: float, implied_away: float) -> tuple[float, float]:
+    """Strip the vig out of a two-way market's raw implied probabilities.
+
+    A sportsbook's home/away moneyline prices always imply a combined
+    probability over 100% (e.g. -150/+130 -> 60.0% + 43.5% = 103.5%) - that
+    extra ~3.5 points is the book's own margin, not real uncertainty about
+    the game. Comparing a model's probability to one side's *raw* implied
+    probability therefore systematically understates how much edge the
+    model actually needs to beat the market by, since part of what it's
+    "beating" is just the vig. This normalizes both sides so they sum to
+    exactly 1.0 (a "multiplicative"/proportional devig - the standard,
+    simplest approach, and good enough for a two-way American-odds market
+    where both sides' vig is roughly symmetric).
+
+    Deliberately not used by compute_clv() above: CLV is about the raw
+    price you actually got vs. the raw closing price, not a fair-value
+    comparison - devigging both would just cancel out in the subtraction
+    anyway (see the module docstring's "beating the close" framing).
+    """
+    total = implied_home + implied_away
+    return implied_home / total, implied_away / total
+
+
 def compute_clv(db: Session, game_id: int, bet_odds: int, bet_side: str) -> dict | None:
     """CLV for a single bet: bet_side is 'home' or 'away'; bet_odds is the
     American price you got when you placed the bet. Returns None if we
@@ -42,8 +65,8 @@ def compute_clv(db: Session, game_id: int, bet_odds: int, bet_side: str) -> dict
     if closing_odds is None:
         return None
 
-    bet_implied = _american_to_implied_prob(bet_odds)
-    closing_implied = _american_to_implied_prob(closing_odds)
+    bet_implied = american_to_implied_prob(bet_odds)
+    closing_implied = american_to_implied_prob(closing_odds)
     # Positive CLV = you got a better (higher) implied-probability price
     # than the closing line, i.e. the market moved toward your side after
     # you bet - the textbook definition of beating the close.

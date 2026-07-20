@@ -113,6 +113,9 @@ def compute_starter_features(
         pitch_count_last_start = starts[0].PitcherGameLog.pitch_count
 
     velo_trend = _velo_trend_last_3(player, as_of_date, starts) if (include_statcast_trend and player) else None
+    pitch_mix = (
+        _pitch_mix_buckets(player, as_of_date) if (include_statcast_trend and player) else dict(_EMPTY_PITCH_MIX)
+    )
 
     return {
         "era_season": _era(season_rows),
@@ -128,6 +131,7 @@ def compute_starter_features(
         "home_away_split_era": {"home": _era(home_rows), "away": _era(away_rows)},
         "vs_opponent_career_era": _era(opponent_rows) if opponent_team_id is not None else None,
         "handedness": player.throws if player else None,
+        **pitch_mix,
     }
 
 
@@ -208,3 +212,44 @@ def _velo_trend_last_3(player: Player, as_of_date: dt.date, starts) -> float | N
     if season_summary["avg_velo"] is None or recent_summary["avg_velo"] is None:
         return None
     return round(recent_summary["avg_velo"] - season_summary["avg_velo"], 1)
+
+
+# Statcast's own pitch_type codes, grouped into three families rather than
+# one column per exact code - a raw pitch_type is too sparse and too
+# pitcher-specific (not everyone throws a splitter, some throw 4 different
+# breaking balls) to be a clean, stable column set across the whole
+# league, but "how fastball-heavy is this start" is a real, comparable
+# signal every pitcher has a value for.
+_FASTBALL_TYPES = {"FF", "SI", "FC"}  # four-seam, sinker, cutter
+_BREAKING_TYPES = {"SL", "CU", "KC", "ST", "SV"}  # slider, curveball, knuckle-curve, sweeper, slurve
+_OFFSPEED_TYPES = {"CH", "FS", "FO", "SC", "KN"}  # changeup, splitter, forkball, screwball, knuckleball
+
+_EMPTY_PITCH_MIX = {"fastball_pct": None, "breaking_pct": None, "offspeed_pct": None}
+
+
+def _pitch_mix_buckets(player: Player, as_of_date: dt.date) -> dict:
+    """Season-to-date pitch-mix usage %, bucketed into fastball/breaking/
+    offspeed families. Reuses the same cached season pitch log
+    `_velo_trend_last_3` already pulls (`_season_pitcher_pitches`), so this
+    is effectively free once that cache is warm for a given pitcher/season
+    - no extra Statcast network cost, just a second cheap pandas
+    groupby over data already in memory.
+    """
+    if not player.mlb_player_id:
+        return dict(_EMPTY_PITCH_MIX)
+
+    season_pitches = _season_pitcher_pitches(player.mlb_player_id, as_of_date.year)
+    if season_pitches.empty:
+        return dict(_EMPTY_PITCH_MIX)
+
+    pitch_dates = pd.to_datetime(season_pitches["game_date"]).dt.date
+    season_window = season_pitches[pitch_dates < as_of_date]
+    mix = summarize_pitcher_statcast(season_window)["pitch_mix"]
+    if not mix:
+        return dict(_EMPTY_PITCH_MIX)
+
+    return {
+        "fastball_pct": round(sum(pct for pt, pct in mix.items() if pt in _FASTBALL_TYPES), 1),
+        "breaking_pct": round(sum(pct for pt, pct in mix.items() if pt in _BREAKING_TYPES), 1),
+        "offspeed_pct": round(sum(pct for pt, pct in mix.items() if pt in _OFFSPEED_TYPES), 1),
+    }
