@@ -231,16 +231,23 @@ class OddsSnapshot(Base):
 class Prediction(Base):
     __tablename__ = "predictions"
     __table_args__ = (
-        # One stored prediction per game per target - a game is played once,
-        # so it should be *predicted* once (computed, then served from this
-        # row from then on), not re-inserted as a growing duplicate log
-        # every time generate_prediction() is called. models/predict.py
-        # upserts against this constraint instead of blindly inserting.
-        UniqueConstraint("game_id", "target_type", name="uq_prediction_game_target"),
+        # One stored prediction per game per target *per model family* - a
+        # game is played once, so a given model should predict it once
+        # (computed, then served from this row from then on, not
+        # re-inserted as a growing duplicate log every time
+        # generate_prediction() is called - see models/predict.py's
+        # upsert). Keying on model_name (not model_version, which bumps
+        # every retrain) means re-training the same model family updates
+        # its row in place, while *different* model families (e.g.
+        # moneyline_logistic vs moneyline_xgboost) each get their own row -
+        # required for the Model Comparison page's blended view, which
+        # needs both models' predictions for the same game at once.
+        UniqueConstraint("game_id", "target_type", "model_name", name="uq_prediction_game_target_model"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     game_id: Mapped[int] = mapped_column(ForeignKey("games.id"), index=True)
+    model_name: Mapped[str] = mapped_column(String(50))
     model_version: Mapped[str] = mapped_column(String(50))
     target_type: Mapped[str] = mapped_column(String(30))
     predicted_value: Mapped[float] = mapped_column(Float, nullable=True)

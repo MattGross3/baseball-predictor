@@ -1,0 +1,38 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# This app never needs backend secrets (ODDS_API_KEY, WEATHER_API_KEY,
+# ADMIN_API_KEY) - those stay server-side in the FastAPI backend's own
+# .env, never referenced here. Ignored anyway as a safety net: any
+# VITE_-prefixed env var gets bundled into the public JS output, so a
+# secret placed in a Vite .env file would leak to every visitor's browser.
+.env
+.env.*
+!.env.example
+
+# verify.mjs screenshot output (playwright-based smoke test - see the file
+# itself; run `node verify.mjs` with the dev server + API up)
+verify_*.png
+sample_*.png
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

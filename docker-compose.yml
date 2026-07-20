@@ -65,6 +65,9 @@ services:
     volumes:
       - ./models/registry:/app/models/registry
 
+  # Streamlit dashboard (Section 9 v1). Kept working alongside `web` below
+  # rather than removed - still useful for quick data/model inspection -
+  # but `web` is the primary, polished dashboard end users should open.
   frontend:
     build:
       context: .
@@ -77,6 +80,19 @@ services:
       API_BASE_URL: http://api:8000
     ports:
       - "8501:8501"
+    depends_on:
+      - api
+
+  # React dashboard (Section 9 v2). nginx serves the static build and
+  # proxies /api/* to `api` - see web/nginx.conf - so the browser never
+  # needs CORS or a hardcoded backend URL either in dev or here.
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:80"
     depends_on:
       - api
 

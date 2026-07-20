@@ -1,0 +1,9 @@
+node_modules
+dist
+.env
+.env.*
+*.log
+verify.mjs
+verify_*.png
+sample_*.png
+.git

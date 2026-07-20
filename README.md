@@ -64,7 +64,8 @@ a historical date range in one shot (what you run first).
 | `models/` | Trains/calibrates the moneyline, totals, NRFI, and player-prop models; the registry of trained artifacts (Section 7). |
 | `backtest/` | Scores a trained model against a date range: accuracy, log-loss, Brier score, ROI, CLV (Section 11). |
 | `api/` | FastAPI app exposing games, features, predictions, odds, and backtest results (Section 8). |
-| `frontend/` | Streamlit dashboard: today's slate, game detail, backtest, model comparison (Section 9). |
+| `web/` | React + TypeScript dashboard (Section 9 v2) - the primary UI. |
+| `frontend/` | Streamlit dashboard (Section 9 v1) - still works, superseded by `web/`. |
 | `scheduler/` | The daily job loop - what actually keeps the data current in production (Section 10). |
 | `scripts/` | One-off operational scripts (currently: historical backfill). |
 | `tests/` | Unit tests for the pure-logic pieces (FIP calc, wOBA proxy, date-split, odds math, etc). |
@@ -315,20 +316,92 @@ Interactive docs at `/docs` once the server's running.
 
 ## Dashboard
 
-Streamlit (`frontend/`), matching Section 9's v1 spec:
+Two dashboards, both talking to the FastAPI backend only (never touching
+the DB directly) - Section 9's spec calls for exactly this v1-then-v2
+progression:
 
-- **Today's Slate** (`app.py`) - game cards: win probability, predicted
-  total, edge vs. market.
-- **Game Detail** (`pages/1_Game_Detail.py`) - predictions, full feature
-  breakdown per side, odds line-movement chart.
-- **Backtest** (`pages/2_Backtest.py`) - accuracy/ROI/CLV for a model over
-  a date range, plus a weekly accuracy/Brier-score trend.
-- **Model Comparison** (`pages/3_Model_Comparison.py`) - baseline vs.
-  XGBoost side by side, plus a simple 50/50 blend scored against actual
-  outcomes.
+### `web/` - React + TypeScript (primary)
 
-All four pages talk to the API only (`frontend/api_client.py`) - no direct
-DB access from the dashboard.
+Vite + React 19 + TypeScript + Tailwind v4 + Recharts. This is the one to
+actually use day to day.
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Opens on http://localhost:5173. In dev, Vite proxies `/api/*` to the
+FastAPI backend on `:8000` (`web/vite.config.ts`) - the browser never talks
+to the backend directly, so there's no CORS to configure and no backend
+URL baked into the JS bundle. Production (`web/Dockerfile` +
+`web/nginx.conf`) does the same proxying trick with nginx instead.
+
+Pages:
+
+- **Today's Slate** (`/`) - every game for a date: expected win % for both
+  teams, predicted total, NRFI %.
+- **Game Detail** (`/games/:id`) - the same metrics plus every stored
+  prediction (one row per trained model, not just the one Today's Slate
+  displays) and the full per-side feature breakdown.
+- **Previous Games** (`/previous-games`) - final games from the last
+  3/7/14 days next to what the model predicted going in, with a
+  Correct/Missed call on the winner and the total-runs miss distance.
+- **Backtest** (`/backtest`) - accuracy/log-loss/Brier/MAE/ROI/CLV for a
+  model over a date range; the weekly trend is a separate opt-in "Load
+  weekly trend" action, not automatic (see the performance note below).
+- **Model Comparison** (`/compare`) - baseline vs. XGBoost side by side,
+  plus a real 50/50 blend of both models' stored predictions scored
+  against actual outcomes.
+
+**No odds/weather in the UI, by design.** Early versions showed an
+"edge vs. market" column and a park/weather block - both always empty
+without `ODDS_API_KEY`/`WEATHER_API_KEY`, which is dead weight for anyone
+running this without those. The UI leads with the model's own expected win
+probability instead (always available, since it only needs a trained
+model); the backend odds/weather ingestion and the `/games/{id}/odds` API
+endpoint are untouched and start working the moment you add a key - the
+frontend change is purely presentational.
+
+**Every prediction is stored once per model family, not recomputed on
+view.** `GET /games/{id}/predictions` is a pure DB read - nothing in the
+dashboard triggers a live model run. `models/predict.py` upserts on
+`(game_id, target_type, model_name)`: re-running prediction generation for
+a game updates that model's existing row instead of appending a duplicate,
+but *different* model families (`moneyline_logistic` vs
+`moneyline_xgboost`) intentionally get separate rows - Model Comparison's
+blend needs both at once. The frontend picks the "headline" model per
+target the same way the backend does (`web/src/lib/predictions.ts` mirrors
+`models/predict.py`'s `PREFERRED_MODEL_BY_TARGET`), so Today's Slate always
+shows the production (XGBoost) model's number even though Game Detail's
+predictions table lists every model.
+
+**Performance note**: `/backtest/results` rebuilds the full per-game
+feature set from scratch on every call (no caching - see
+[Feature engineering](#feature-engineering)'s leakage-discipline note), so
+it's a genuinely multi-second call, not an instant lookup. The Backtest and
+Model Comparison pages default to a 7-day range and load the (much slower)
+weekly trend chart as a separate, explicit action rather than blocking the
+initial page render - widen the range deliberately, not as something you
+wait on by default.
+
+Verified with a headless-Chromium smoke test (`web/verify.mjs`, via
+Playwright) against the live API with real data - all five pages/routes
+load with zero console errors; screenshots are gitignored (dev artifacts,
+not part of the app).
+
+### `frontend/` - Streamlit (secondary)
+
+Still working, still useful for quick ad-hoc inspection, but superseded by
+`web/` as the dashboard end users should open:
+
+```bash
+streamlit run frontend/app.py
+```
+
+- **Today's Slate** (`app.py`), **Game Detail**, **Backtest**, **Model
+  Comparison** (`pages/`) - same four views `web/` has, built first as the
+  Section 9 v1 proof of concept per the spec's suggested build order.
 
 ---
 
@@ -384,16 +457,20 @@ docker compose up --build
 
 Services: `postgres`, a one-shot `migrate` (runs `alembic upgrade head`,
 everything else waits on it via `service_completed_successfully`), `api`
-(:8000), `scheduler`, `frontend` (:8501). Secrets come from `.env`
-(gitignored) via `env_file:` - never baked into the image.
+(:8000), `scheduler`, `frontend` - Streamlit (:8501), `web` - React, built
+via `web/Dockerfile`'s multi-stage node-build-then-nginx (:3000). Secrets
+come from `.env` (gitignored) via `env_file:` - never baked into the
+image; `web` doesn't take an `env_file:` at all since it has no secrets to
+receive (see the "no odds/weather" note in [Dashboard](#dashboard)).
 
 > **Not verified in this build session** - Docker Desktop wasn't running
 > in the sandbox this was built in, so `docker compose up` itself hasn't
 > been exercised end-to-end here, only reviewed. Everything it runs
 > (`alembic upgrade head`, `uvicorn`, `streamlit run`, `python -m
-> scheduler.daily_jobs`) has been run and verified natively. Run it
-> yourself and open an issue in your own tracking if something in the
-> Compose config doesn't match the native behavior.
+> scheduler.daily_jobs`, `npm run build` + nginx) has been run and
+> verified natively/via `npm run dev`. Run it yourself and open an issue
+> in your own tracking if something in the Compose config doesn't match
+> the native behavior.
 
 ---
 

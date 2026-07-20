@@ -154,7 +154,14 @@ def run_backtest(db: Session, model_name: str, start_date: dt.date, end_date: dt
             y_pred = [poisson_run_distribution(model, X.iloc[[i]])["mean"] for i in range(len(X))]
         else:
             y_pred = [xgb_run_distribution(model, X.iloc[[i]])["mean"] for i in range(len(X))]
-        result.update(regression_metrics(df["label"], y_pred))
+        reg_metrics = regression_metrics(df["label"], y_pred)
+        # regression_metrics returns {"mae", "rmse", "n"} - "n" here means
+        # "games scored", not "bets placed" (totals aren't backtested as
+        # bets), but n_bets is the one field name the schema/frontend use
+        # across both branches, so reuse it rather than adding a second
+        # count field just for this target.
+        result["n_bets"] = reg_metrics.pop("n")
+        result.update(reg_metrics)
         result["roi_flat_bet"] = result["roi_kelly"] = result["clv_avg"] = None
 
     result.setdefault("n_bets", 0)

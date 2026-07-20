@@ -51,6 +51,7 @@ class PredictionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     game_id: int
+    model_name: str
     model_version: str
     target_type: str
     predicted_value: float | None = None
@@ -83,9 +84,14 @@ class BacktestResultOut(BaseModel):
     model: str
     target_type: str
     date_range: str
+    # Classification targets (moneyline, nrfi):
     accuracy: float | None = None
     log_loss: float | None = None
     brier_score: float | None = None
+    # Regression target (total) - backtest_engine.run_backtest returns
+    # these via regression_metrics() instead of the three above.
+    mae: float | None = None
+    rmse: float | None = None
     roi_flat_bet: float | None = None
     roi_kelly: float | None = None
     clv_avg: float | None = None

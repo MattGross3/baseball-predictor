@@ -122,13 +122,17 @@ def compute_umpire_zone_history(db: Session, umpire_name: str, as_of_date: dt.da
         100 * (out_of_zone["description"] == CALLED_STRIKE).mean() if len(out_of_zone) else None
     )
 
-    k_pct = 100 * (ump_pitches["events"] == "strikeout").sum() / max(len(game_pks), 1)
+    # Combined (both teams) strikeouts per game in this umpire's starts -
+    # comparable directly to the ~16-17/game modern MLB average. Earlier
+    # this multiplied by 100 (a leftover from treating it as a percentage
+    # it never was), which inflated it into meaningless four-digit values.
+    k_per_game = (ump_pitches["events"] == "strikeout").sum() / max(len(game_pks), 1)
 
     return {
         # Higher = umpire calls more strikes on pitches outside the zone
         # (a "pitcher-friendly" / larger effective zone).
         "strike_zone_size_percentile": round(generous_pct, 1) if generous_pct is not None else None,
         "over_under_lean": round(sum(total_runs) / len(total_runs), 2),
-        "k_rate_boost": round(k_pct, 2),
+        "k_rate_boost": round(k_per_game, 2),
         "n_games": len(rows),
     }

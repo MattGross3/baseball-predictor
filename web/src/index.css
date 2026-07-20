@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  /* Categorical pair used consistently for home/away everywhere in the
+     app (probability splits, charts) - never reassigned per view. */
+  --color-home: #2563eb;
+  --color-home-soft: #2563eb1a;
+  --color-away: #ea580c;
+  --color-away-soft: #ea580c1a;
+
+  /* Status */
+  --color-good: #16a34a;
+  --color-good-soft: #16a34a1a;
+  --color-critical: #dc2626;
+  --color-critical-soft: #dc26261a;
+  --color-warning: #ca8a04;
+
+  /* Light surface system, matching the approved reference design. */
+  --color-surface: #fafaf7;
+  --color-surface-raised: #f3f3ee;
+  --color-surface-card: #ffffff;
+  --color-border: #e6e5df;
+  --color-ink: #18181b;
+  --color-ink-muted: #6b6b64;
+  --color-ink-faint: #9a9a91;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  background: var(--color-surface);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  min-height: 100vh;
+}
+
+::selection {
+  background: var(--color-home-soft);
+}
+
+.recharts-cartesian-axis-tick text {
+  fill: var(--color-ink-faint);
+}
+.recharts-legend-item-text {
+  color: var(--color-ink-muted) !important;
+}
