@@ -79,7 +79,7 @@ a historical date range in one shot (what you run first).
 | MLB Stats API | 4.1 | ✅ Live, free, no key | Schedule, boxscores, lineups, rosters, injuries, umpire assignments (via boxscore `officials`), linescores. |
 | Baseball Savant / Statcast | 4.2 | ✅ Live, free, no key | Via `pybaseball`. Pitch-level velo/spin/whiff, batted-ball exit velo/barrel%. Also team-level Outs Above Average (Savant's leaderboard CSV export isn't blocked, unlike FanGraphs'). |
 | FanGraphs | 4.3 | ⚠️ Blocked upstream | FanGraphs currently returns HTTP 403 to `pybaseball`'s scraper (their own anti-bot measure, not a bug here). `ingestion/fangraphs.py` fails soft and logs a warning; `features/pitcher_features.py` falls back to computing FIP itself from boxscore components (`ingestion/fangraphs.estimate_fip`). SIERA/xFIP/wOBA/wRC+/projections have no fallback and come back `None`. |
-| The Odds API | 4.4 | 🔑 Needs `ODDS_API_KEY` | Free tier: 500 req/month. Without a key, odds ingestion no-ops; edge-vs-market and ROI/CLV fields come back `null`/`N/A` everywhere instead of erroring. |
+| The Odds API | 4.4 | 🔑 Needs `ODDS_API_KEY` | Free tier: 500 req/month, account-wide. Without a key, odds ingestion no-ops; ROI/CLV fields come back `null`/`N/A`. With a key, `ingestion/api_budget.py` enforces a hard monthly cap and the scheduler only polls at 4 fixed times/day (~100 calls/month) instead of continuously - see [Scheduler](#scheduler). Feeds `market_implied_probability_home/away` into the moneyline model as a real feature, not just a display value. |
 | OpenWeatherMap | 4.5 | 🔑 Needs `WEATHER_API_KEY` | Free tier only covers current conditions + 5-day forecast, so historical weather (for backtesting older games) isn't available even with a key - those rows stay `null`. |
 | Umpire assignments | 4.6 | ✅ Live, free, no key | Turns out to be in the MLB Stats API boxscore (`officials`), no separate source needed. |
 | Umpire zone history | 4.6 | ✅ Live, computed | Built from our own DB (which umpire worked which game) joined to Statcast pitch calls - see `ingestion/umpire_scorecards.py`. |
@@ -257,16 +257,36 @@ date (`models/model_utils.date_split`), never a random shuffle, per the
 spec's explicit warning in Section 11.
 
 **Performance note**: two features (`velo_trend_last_3`, and umpire
-`strike_zone_size_percentile`/`over_under_lean`/`k_rate_boost`) require
-live Statcast network pulls - cheap for one live prediction, far too slow
-to repeat across hundreds of historical games. `build_training_matrix`
-passes `include_statcast_trend=False` to skip them during bulk training
-(those columns are `None` in the training matrix); live single-game
-prediction (`models/predict.py`) leaves them on. This alone took a
-training run for one month of data from "didn't finish in 10 minutes" to
-"finishes in about 20 seconds" - see the umpire zone-history docstring in
-`ingestion/umpire_scorecards.py` for why (it was pulling a full-league
-Statcast date range per game before the fix).
+`strike_zone_size_percentile`/`over_under_lean`/`k_rate_boost`) need
+Statcast pitch-level data. They used to be skipped during bulk training
+(`build_training_matrix` passed `include_statcast_trend=False`) because a
+naive per-game implementation meant hundreds of fresh network pulls -
+both are now backed by an in-process, per-season `lru_cache`
+(`pitcher_features._season_pitcher_pitches`,
+`umpire_scorecards._season_league_pitches`), so training builds them for
+real instead of leaving the columns `None`.
+
+That caching fix also caught a real, separate bug: `velo_trend_last_3`
+was being looked up using our internal `players.id` instead of the
+pitcher's actual MLB Advanced Media id, so it silently returned `None` on
+*every* call - training and live prediction alike - regardless of the
+`include_statcast_trend` flag. It's fixed now (see
+`features/pitcher_features.py`).
+
+The first Statcast pull for a given season is still a real one-time cost
+(~1-2 minutes for the umpire league-wide pull, ~5-10s per distinct
+starting pitcher for their season log) - subsequent calls in the same
+process are near-instant, and pybaseball's own disk cache means later
+process restarts skip most of the per-pitcher network cost too. The API
+server pre-warms the umpire season cache in a background thread at
+startup (`api/main.py`) so this cost lands during boot rather than on
+whichever user's request happens to hit `/backtest/results` first.
+
+`compute_team_features`'s `include_live_oaa` is a separate flag from
+`include_statcast_trend` - unlike the two above, it's a **leakage** guard,
+not a performance one (Baseball Savant's OAA leaderboard can't be bounded
+to a past date), so `build_training_matrix` always passes it `False`
+regardless of how fast the Statcast lookups get.
 
 ---
 
@@ -415,7 +435,7 @@ Section 10:
 |---|---|---|
 | `job_morning_schedule` | 06:00 (configured timezone) | Ingest today's schedule + probable pitchers |
 | `job_poll_lineups` | every 30 min | Confirmed lineups for games within 3h of first pitch |
-| `job_poll_odds` | every 15 min | Line movement (no-ops without `ODDS_API_KEY`) |
+| `job_poll_odds` | 10:00, 14:00, 17:00, 19:00 (configured timezone) | Line movement (no-ops without `ODDS_API_KEY`, or on days with no slate). Deliberately *not* the spec's literal "every 15 min" - see below. |
 | `job_pregame_predictions` | every 10 min | Generates predictions for games 50-70 min from first pitch |
 | `job_postgame_results` | every 20 min | Boxscores/linescores/umpires for newly-finished games |
 | `job_nightly_retrain_check` | 02:00 | Retrains only if it's been ≥7 days since the last run per target - the spec's explicit "weekly not daily, to avoid overfitting to noise" rule |
@@ -424,6 +444,20 @@ The two "N hours pre-game" jobs are implemented as a short fixed-interval
 scan of today's games rather than one dynamically-scheduled job per game -
 simpler, self-healing if a run is missed, and idempotent. See the module
 docstring for the reasoning.
+
+**Odds polling budget**: The Odds API's free tier is 500 requests/month,
+account-wide - the spec's literal "every 15 min" would be ~96 calls/day and
+blow through that in under 5 days. One call returns the *whole* day's
+slate at once (not per-game), so instead of polling continuously,
+`job_poll_odds` fires at 4 fixed checkpoints/day (`ODDS_POLL_HOURS_ET` in
+`scheduler/daily_jobs.py`) and skips entirely on days with no games. That's
+~100 calls/month against a ~450-call usable budget (limit minus
+`ingestion/api_budget.py`'s safety buffer) - comfortable headroom, not a
+number you should need to watch closely. `api_budget.py`'s hard monthly
+cap is the backstop if something else goes wrong (a bug, manual testing,
+etc.), not the primary control - every call, wherever it comes from,
+checks and records against the same counter, so the two can't drift out of
+sync.
 
 ---
 
@@ -519,10 +553,37 @@ Other honest simplifications, all documented inline where they live:
 - **FIP is self-computed**, not FanGraphs', when FanGraphs is unreachable
   (currently always - see the data-sources table). SIERA has no
   no-FanGraphs fallback and is `None`.
-- **NRFI features reuse the general season-level features** (era_season,
-  lineup wOBA, park factors) rather than true first-inning-specific
-  splits (leadoff OBP, starter's first-inning ERA specifically), since
-  that needs play-by-play parsing not built in this pass.
+- **NRFI features mostly reuse the general season-level features**
+  (era_season, lineup wOBA, park factors). Leadoff hitter OBP is now a
+  real first-inning-specific feature (`features/batter_features.compute_
+  leadoff_obp`); starter first-inning-specific ERA/WHIP is still a gap,
+  since that needs play-by-play parsing not built in this pass.
+- **Starter pitch-mix (`pitch_mix`, `primary_pitch_type`) is computed**
+  by `ingestion/statcast.summarize_pitcher_statcast` but not yet folded
+  into any model's feature set - it's a dict, not a scalar, so it needs
+  an actual encoding decision (one-hot the primary pitch type? distance
+  from a league-average mix?) rather than just being added to the flat
+  feature row like everything else.
+- **Injuries** are reconstructed from real MLB transaction history
+  (`ingestion/mlb_stats_api.fetch_transactions` +
+  `features/injury_features.replay_il_transactions`), not the
+  `rosterType=injuredList` roster filter the spec sketch implies - that
+  parameter doesn't actually exist on the live API (confirmed against
+  `/rosterTypes`). `injured_count` / `key_regulars_injured` are real,
+  point-in-time-correct features fed into all three models.
+- **Team defensive OAA** (`oaa_defense_rating`) is gated off during bulk
+  training (`compute_team_features`'s `include_live_oaa=False`) because
+  Baseball Savant's leaderboard endpoint silently ignores date-range
+  params - there's no way to ask it for "OAA as of a past date," so using
+  it in training would leak each team's full current-season defensive
+  numbers into historical rows. Live prediction leaves it on, where it's
+  not leaky (today's "full season to date" already means "as of today").
+- **Not yet built**: rest days/travel distance between series, direct
+  batter-vs-pitcher matchup history, recency-weighted (exponential decay)
+  form instead of flat season/rolling averages, and any kind of Elo-style
+  team strength rating. All would plug into the existing feature-dict
+  pattern in `features/build_feature_matrix.py` without restructuring
+  anything.
 - **Wind "blowing out" direction is a heuristic**, not per-park azimuth
   (Savant's venue data has an `azimuthAngle` that would make this exact -
   noted in `features/park_weather_features.py` as a follow-up).
@@ -534,14 +595,20 @@ Other honest simplifications, all documented inline where they live:
 
 ## On predictive power (read this before trusting a number)
 
-This app's pipeline is real and was verified against real 2025 MLB data
-end to end. Its **models are not**, yet, meaningfully predictive - and
-that's expected, not a bug: they were trained on ~4 weeks of backfilled
-data (299 training games) purely to prove the pipeline works. Held-out
-test accuracy came back close to a coin flip (moneyline XGBoost: 58% on
-62 held-out games; NRFI: ~48-50%), which is exactly what you'd expect from
-one month of data with mostly-thin rolling-window history at the start of
-that window.
+This app's pipeline is real and was verified against real 2025-2026 MLB
+data end to end. Its **models are not**, yet, meaningfully predictive -
+and that's expected, not a bug. The latest retrain used the full
+backfilled dataset (2025-04-01 through 2026-07-20, 1,942 games with a
+held-out test window of the most recent ~30 days) with every feature
+described in this doc turned on, including the previously-broken
+velocity-trend and umpire zone-history features. Held-out test accuracy
+is still close to a coin flip (moneyline logistic: 52.4% / log-loss 0.692
+on 359 games; NRFI logistic: 49.4% / log-loss 0.704 on 354 games) -
+consistent with baseball being a famously hard sport to beat the market
+on, not a sign of a pipeline bug. A diagnostic pass on NRFI specifically
+(predicted probabilities clustered tightly around 0.5, Brier score barely
+better than an always-0.5 baseline) confirms this is thin/weak real
+signal, not a code defect.
 
 To get a model actually worth trusting: backfill a full season or more
 (`python -m scripts.backfill_data`, just with a much wider date range),

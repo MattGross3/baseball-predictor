@@ -17,13 +17,15 @@ it, and the field is `None` if you call this standalone without one.
 from __future__ import annotations
 
 import datetime as dt
+from functools import lru_cache
 
+import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from database.models import Game, PitcherGameLog, Player
 from ingestion.fangraphs import estimate_fip
-from ingestion.statcast import compute_pitcher_statcast_summary
+from ingestion.statcast import fetch_pitcher_statcast, summarize_pitcher_statcast
 
 SEASON_START_MONTH_DAY = (3, 1)  # spring training/opening day is always in March
 
@@ -62,12 +64,13 @@ def compute_starter_features(
     opponent_team_id: int | None = None,
     include_statcast_trend: bool = True,
 ) -> dict:
-    """`include_statcast_trend` gates `velo_trend_last_3`, which costs 2
-    live Statcast/pybaseball network pulls per call. That's negligible for
-    a single live prediction (a handful of starters a day) but becomes the
-    dominant cost when building a training matrix over hundreds of
-    historical games - build_training_matrix passes False for that reason
-    and leaves velo_trend_last_3 as None for those rows.
+    """`include_statcast_trend` used to gate `velo_trend_last_3` purely for
+    speed (2 fresh Statcast network pulls per call, prohibitive across
+    hundreds of training games) - now that those pulls are cached per
+    (pitcher, season) instead of re-fetched per start (see
+    `_season_pitcher_pitches`), this stays as an opt-out escape hatch for
+    exceptional cases, not something build_training_matrix needs to lean
+    on by default anymore.
     """
     player = db.get(Player, pitcher_id)
     season_rows = _pitcher_logs(db, pitcher_id, as_of_date)
@@ -99,7 +102,7 @@ def compute_starter_features(
         days_rest = (as_of_date - last_start_date).days
         pitch_count_last_start = starts[0].PitcherGameLog.pitch_count
 
-    velo_trend = _velo_trend_last_3(db, pitcher_id, as_of_date, starts) if include_statcast_trend else None
+    velo_trend = _velo_trend_last_3(player, as_of_date, starts) if (include_statcast_trend and player) else None
 
     return {
         "era_season": _era(season_rows),
@@ -117,20 +120,54 @@ def compute_starter_features(
     }
 
 
-def _velo_trend_last_3(db: Session, pitcher_id: int, as_of_date: dt.date, starts) -> float | None:
+@lru_cache(maxsize=512)
+def _season_pitcher_pitches(pitcher_mlb_id: int, season: int):
+    """Whole-season Statcast pitch log for one pitcher, fetched once and
+    cached in-process - reused for every start of theirs in a build
+    instead of 2 fresh, narrow, shifting-window fetches per start (the
+    old approach was so slow across hundreds of historical starts that
+    build_training_matrix disabled this feature for training entirely,
+    which meant it was 100% None in every training row and got dropped
+    from the model's learned feature set - see model_utils.prepare_xy's
+    dropna - so real values at live prediction time were silently
+    discarded by a model that had never learned any split on this column).
+
+    Also where a real, separate bug got caught and fixed: this used to be
+    called with our internal `players.id` (a small sequential integer)
+    instead of the pitcher's actual MLB Advanced Media id - Statcast
+    always returned zero pitches for that bogus id, so `velo_trend_last_3`
+    was silently None even on the "live, full-cost" path, before caching
+    was ever a factor.
+    """
+    start = dt.date(season, *SEASON_START_MONTH_DAY)
+    end = dt.date(season, 12, 31)
+    try:
+        return fetch_pitcher_statcast(pitcher_mlb_id, start, end)
+    except Exception:
+        return pd.DataFrame()
+
+
+def _velo_trend_last_3(player: Player, as_of_date: dt.date, starts) -> float | None:
     """Delta between avg fastball velo over the last 3 starts and the
     season-to-date average, using Statcast pitch-level data. A positive
     value means the pitcher is throwing harder recently than his season
     norm; negative can flag fatigue or an injury risk signal."""
-    if not starts:
+    if not starts or not player.mlb_player_id:
         return None
 
-    season_summary = compute_pitcher_statcast_summary(
-        pitcher_id, as_of_date, lookback_days=(as_of_date - _season_start(as_of_date)).days
-    )
+    season_pitches = _season_pitcher_pitches(player.mlb_player_id, as_of_date.year)
+    if season_pitches.empty:
+        return None
+
+    # Slice the cached season data locally instead of a new network call -
+    # "game_date" is a real date column on every Statcast pitch row.
+    pitch_dates = pd.to_datetime(season_pitches["game_date"]).dt.date
+    season_window = season_pitches[pitch_dates < as_of_date]
+    season_summary = summarize_pitcher_statcast(season_window)
+
     window_start = starts[min(2, len(starts) - 1)].date
-    lookback = (as_of_date - window_start).days + 1
-    recent_summary = compute_pitcher_statcast_summary(pitcher_id, as_of_date, lookback_days=max(lookback, 1))
+    recent_window = season_pitches[(pitch_dates >= window_start) & (pitch_dates < as_of_date)]
+    recent_summary = summarize_pitcher_statcast(recent_window)
 
     if season_summary["avg_velo"] is None or recent_summary["avg_velo"] is None:
         return None

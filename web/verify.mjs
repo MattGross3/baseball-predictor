@@ -19,7 +19,13 @@ page.on('pageerror', (err) => errors.push(`[pageerror] ${err.message}`))
 
 for (const p of pages) {
   errors.length = 0
-  await page.goto(base + p.path, { waitUntil: 'networkidle' })
+  // /backtest and /compare both trigger a live backtest run server-side
+  // (full feature rebuild per game) - the default 30s nav timeout is too
+  // tight for that even with the umpire/pitcher Statcast season caches
+  // warm, so give those two more room. The page itself shows a loading
+  // state well within 30s; this is purely the test's own patience.
+  const timeout = p.path === '/backtest' || p.path === '/compare' ? 60000 : 30000
+  await page.goto(base + p.path, { waitUntil: 'networkidle', timeout })
   await page.waitForTimeout(1500)
   await page.screenshot({ path: `verify_${p.name}.png`, fullPage: true })
   console.log(`${p.path} -> errors: ${errors.length ? errors.join(' | ') : 'none'}`)

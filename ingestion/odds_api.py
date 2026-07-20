@@ -1,9 +1,15 @@
 """
 Odds ingestion (Section 4.4), via The Odds API (https://the-odds-api.com/).
 
-Requires ODDS_API_KEY in .env - the free tier is 500 requests/month, which
-is tight for 15-minute polling across a full slate (see scheduler/daily_jobs.py
-for the polling cadence and how to back it off if you're on the free tier).
+Requires ODDS_API_KEY in .env - the free tier is 500 requests/month, a hard
+account-wide cap covering every endpoint below, not per-endpoint. Every
+function that actually calls out enforces `ingestion.api_budget.within_budget`
+first and records the call via `record_call` right at the request site (not
+some approximation after the fact), so the count can never drift from what
+The Odds API itself sees - see api_budget.py's docstring, and
+scheduler/daily_jobs.py's ODDS_POLL_INTERVAL_MINUTES for how the default
+polling cadence stays well under the cap by design rather than leaning on
+this hard stop to save you.
 
 Without a key, every function here returns an empty result rather than
 raising, so the rest of the app (predictions, dashboard) still works -
@@ -20,23 +26,32 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database.models import Game, OddsSnapshot
+from ingestion.api_budget import record_call, within_budget
 
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://api.the-odds-api.com/v4"
 SPORT_KEY = "baseball_mlb"
 REQUEST_TIMEOUT = 15
+API_NAME = "the-odds-api"
 
 
-def fetch_current_lines(bookmaker_region: str = "us") -> list[dict]:
-    """Moneyline / run line / total for every upcoming MLB game.
+def fetch_current_lines(db: Session, bookmaker_region: str = "us") -> list[dict]:
+    """Moneyline / run line / total for every upcoming MLB game - one
+    request against the account-wide monthly budget, regardless of how
+    many games are in the slate (The Odds API returns the whole slate in
+    one call).
 
     Returns The Odds API's raw event list (one dict per game, each carrying
     a `bookmakers` list) - `ingest_current_lines` is what maps that onto our
-    per-game `odds_snapshots` rows.
+    per-game `odds_snapshots` rows. Takes `db` (unlike a "pure" fetch
+    wrapper elsewhere in ingestion/) because the budget check needs it -
+    there is no way to call this function and skip the budget accounting.
     """
     if not settings.has_odds_key:
         log.debug("ODDS_API_KEY not set - skipping odds fetch")
+        return []
+    if not within_budget(db, API_NAME, settings.odds_api_monthly_limit, settings.odds_api_safety_buffer):
         return []
 
     resp = requests.get(
@@ -49,23 +64,27 @@ def fetch_current_lines(bookmaker_region: str = "us") -> list[dict]:
         },
         timeout=REQUEST_TIMEOUT,
     )
+    record_call(db, API_NAME)
     resp.raise_for_status()
     remaining = resp.headers.get("x-requests-remaining")
     if remaining is not None:
-        log.info("The Odds API requests remaining this period: %s", remaining)
+        log.info("The Odds API requests remaining this period (per their own header): %s", remaining)
     return resp.json()
 
 
-def fetch_line_history(event_id: str, timestamp: dt.datetime) -> dict | None:
+def fetch_line_history(db: Session, event_id: str, timestamp: dt.datetime) -> dict | None:
     """Odds as of a specific point in time, for closing-line-value tracking.
 
     Requires The Odds API's paid "historical odds" add-on
     (`/v4/historical/sports/.../odds`) - the free tier only exposes current
     lines. Returns None on any non-2xx response (e.g. 422 "not on your
     plan") so CLV tracking degrades to "insufficient data" instead of
-    crashing the backtest.
+    crashing the backtest. Budget-checked the same as fetch_current_lines -
+    this endpoint counts against the same account-wide monthly cap.
     """
     if not settings.has_odds_key:
+        return None
+    if not within_budget(db, API_NAME, settings.odds_api_monthly_limit, settings.odds_api_safety_buffer):
         return None
 
     resp = requests.get(
@@ -79,6 +98,7 @@ def fetch_line_history(event_id: str, timestamp: dt.datetime) -> dict | None:
         },
         timeout=REQUEST_TIMEOUT,
     )
+    record_call(db, API_NAME)
     if resp.status_code != 200:
         log.warning("Historical odds unavailable (status %s) - is your plan the free tier?", resp.status_code)
         return None
@@ -155,7 +175,7 @@ def ingest_current_lines(db: Session) -> int:
     """Pull current lines for all upcoming games and write an `odds_snapshots`
     row per game (one row per poll, so line movement over time is queryable -
     see backtest/clv_tracker.py)."""
-    events = fetch_current_lines()
+    events = fetch_current_lines(db)
     written = 0
     now = dt.datetime.now(dt.timezone.utc)
 

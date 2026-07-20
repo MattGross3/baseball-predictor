@@ -46,7 +46,10 @@ def train_baseline_logistic(X_train: pd.DataFrame, y_train: pd.Series) -> Calibr
     # Feature scales vary wildly here (e.g. era_season ~0-10 vs win_pct
     # ~0-1), which is exactly what makes lbfgs slow/non-convergent - scale
     # first rather than just cranking max_iter.
-    base = make_pipeline(StandardScaler(), LogisticRegression(class_weight="balanced", max_iter=2000))
+    base = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(class_weight="balanced", max_iter=4000, solver="lbfgs", random_state=42),
+    )
     model = CalibratedClassifierCV(base, method="isotonic", cv=5)
     model.fit(X_train, y_train)
     return model
@@ -58,12 +61,22 @@ def train_xgboost_calibrated(X_train: pd.DataFrame, y_train: pd.Series) -> Calib
     early-stopping eval set and the isotonic calibration set)."""
     fit_X, calib_X, fit_y, calib_y = train_test_split(X_train, y_train, test_size=0.2, shuffle=False)
 
+    positive_ratio = float(y_train.mean())
+    negative_ratio = 1.0 - positive_ratio
+    scale_pos_weight = negative_ratio / positive_ratio if positive_ratio > 0 else 1.0
+
     xgb = XGBClassifier(
-        n_estimators=500,
-        max_depth=4,
-        learning_rate=0.05,
+        n_estimators=700,
+        max_depth=5,
+        min_child_weight=3,
+        learning_rate=0.04,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        reg_lambda=1.0,
+        scale_pos_weight=scale_pos_weight,
         eval_metric="logloss",
-        early_stopping_rounds=20,
+        early_stopping_rounds=25,
+        random_state=42,
     )
     xgb.fit(fit_X, fit_y, eval_set=[(calib_X, calib_y)], verbose=False)
 

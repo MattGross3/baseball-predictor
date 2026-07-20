@@ -44,6 +44,21 @@ PREDICTION_WINDOW_MINUTES = (50, 70)  # fire once a game's start_time is 50-70 m
 RETRAIN_MIN_INTERVAL_DAYS = 7  # spec: retrain weekly, not daily, to avoid overfitting to noise
 RETRAIN_TRAIN_WINDOW_DAYS = 90
 
+# The spec's original "every 15 min" would be ~96 calls/day if it ran
+# around the clock - enough to blow through The Odds API's entire 500/month
+# free-tier budget in under 5 days. One call covers the *whole* day's slate
+# (not per-game), so instead of polling continuously we check in at a
+# handful of fixed times: morning (opening-ish lines), early afternoon,
+# and two checkpoints closer to first pitch (the second doubles as a
+# reasonable "closing line" snapshot for CLV tracking, which just needs an
+# early and a late price - see backtest/clv_tracker.py). At 4 checkpoints
+# x ~26 game-days/month that's roughly 100 calls/month - well under the
+# ~450 usable budget (limit minus ingestion.api_budget's safety buffer),
+# with plenty of headroom for manual testing. ingestion.api_budget's hard
+# cap is the backstop, not the primary control - this cadence is designed
+# to never need it.
+ODDS_POLL_HOURS_ET = (10, 14, 17, 19)
+
 
 def job_morning_schedule() -> None:
     """06:00 ET - fetch_daily_schedule() + probable pitchers (included in
@@ -79,12 +94,19 @@ def job_poll_lineups() -> None:
 
 
 def job_poll_odds() -> None:
-    """Every 15 min - poll odds_api for line movement. No-ops (logs once)
-    if ODDS_API_KEY isn't configured."""
+    """Fires at ODDS_POLL_HOURS_ET (see that constant for the budget math) -
+    poll odds_api for line movement. No-ops (logs once) if ODDS_API_KEY
+    isn't configured, or if there's no slate today (no point spending a
+    call - e.g. the All-Star break)."""
     if not settings.has_odds_key:
         log.debug("job_poll_odds: ODDS_API_KEY not set, skipping")
         return
+
     with session_scope() as db:
+        has_games_today = db.execute(select(Game.id).where(Game.date == dt.date.today()).limit(1)).first()
+        if not has_games_today:
+            log.debug("job_poll_odds: no games today, skipping to save the call")
+            return
         written = odds_api.ingest_current_lines(db)
     log.info("job_poll_odds: wrote %d odds snapshots", written)
 
@@ -177,7 +199,7 @@ def build_scheduler() -> BlockingScheduler:
 
     scheduler.add_job(job_morning_schedule, CronTrigger(hour=6, minute=0, timezone=tz), id="morning_schedule")
     scheduler.add_job(job_poll_lineups, IntervalTrigger(minutes=30), id="poll_lineups")
-    scheduler.add_job(job_poll_odds, IntervalTrigger(minutes=15), id="poll_odds")
+    scheduler.add_job(job_poll_odds, CronTrigger(hour=",".join(map(str, ODDS_POLL_HOURS_ET)), minute=0, timezone=tz), id="poll_odds")
     scheduler.add_job(job_pregame_predictions, IntervalTrigger(minutes=10), id="pregame_predictions")
     scheduler.add_job(job_postgame_results, IntervalTrigger(minutes=20), id="postgame_results")
     scheduler.add_job(job_nightly_retrain_check, CronTrigger(hour=2, minute=0, timezone=tz), id="nightly_retrain_check")

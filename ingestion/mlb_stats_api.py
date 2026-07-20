@@ -150,15 +150,28 @@ def fetch_team_roster(team_id: int, roster_type: str = "active") -> list[dict]:
     return data.get("roster", [])
 
 
-def fetch_injuries(team_id: int) -> list[dict]:
-    """MLB Stats API has no cross-league injuries endpoint; injuries are
-    exposed per-team via the injuredList roster type, so callers loop over
-    teams (see `fetch_all_injuries`)."""
-    return fetch_team_roster(team_id, roster_type="injuredList")
+def fetch_transactions(team_id: int, start_date: dt.date, end_date: dt.date) -> list[dict]:
+    """Roster transactions (trades, call-ups, injured-list moves, etc.)
+    for a team in a date range - each has a `person`, a `date`, and a free-
+    text `description` (e.g. "placed 3B José Ramírez on the 10-day
+    injured list", "activated ... from the 60-day injured list").
 
-
-def fetch_all_injuries() -> dict[int, list[dict]]:
-    return {team["id"]: fetch_injuries(team["id"]) for team in fetch_teams()}
+    This replaced an earlier, broken attempt at injuries: `rosterType=
+    injuredList` looks like a real parameter but isn't one - MLB's own
+    `/rosterTypes` meta-endpoint lists only 40Man/fullSeason/fullRoster/
+    nonRosterInvitees/active/allTime/depthChart/gameday/coach, so passing
+    "injuredList" silently fell back to the full active roster instead of
+    raising, and every "injured" player came back with status "Active".
+    Transactions are the real source, and - unlike a live roster snapshot -
+    they carry a genuine date, so features/injury_features.py can replay
+    them to ask "who was on the IL as of this past date," which works for
+    historical training data too, not just live predictions.
+    """
+    data = _get(
+        "/transactions",
+        {"teamId": team_id, "startDate": start_date.isoformat(), "endDate": end_date.isoformat()},
+    )
+    return data.get("transactions", [])
 
 
 # --------------------------------------------------------------------------

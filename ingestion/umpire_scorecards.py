@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+from functools import lru_cache
 
 import pandas as pd
 from pybaseball import statcast
@@ -74,6 +75,30 @@ def ingest_umpire_assignment(db: Session, mlb_game_id: int) -> int:
     return written
 
 
+@lru_cache(maxsize=8)
+def _season_league_pitches(season: int) -> pd.DataFrame:
+    """Whole-season, league-wide Statcast pitch log, fetched once and
+    cached in-process - reused for every umpire/game evaluated in that
+    season instead of a fresh ~45-day `statcast()` pull per (umpire,
+    as_of_date) pair. The old per-call approach was so slow across
+    hundreds of historical games that `build_training_matrix` disabled
+    this feature for training entirely; this is the same tradeoff and fix
+    pattern as `pitcher_features._season_pitcher_pitches`.
+
+    A ~2-week league-wide pull was measured at ~7.7s / ~57k rows / ~66MB,
+    so a full ~4.5-month season is a one-time cost of roughly a minute and
+    several hundred MB per training run - trivial next to re-paying that
+    per umpire-game.
+    """
+    start = dt.date(season, 3, 1)
+    end = dt.date(season, 12, 31)
+    try:
+        return statcast(start.isoformat(), end.isoformat())
+    except Exception as exc:
+        log.warning("Season-wide Statcast pull failed for %s (%s)", season, exc)
+        return pd.DataFrame()
+
+
 def compute_umpire_zone_history(db: Session, umpire_name: str, as_of_date: dt.date, lookback_days: int = 45) -> dict:
     """Strike-zone-size / over-under lean / K-rate boost for a home-plate
     umpire, built from this umpire's prior games in our own DB joined to
@@ -99,12 +124,18 @@ def compute_umpire_zone_history(db: Session, umpire_name: str, as_of_date: dt.da
     game_pks = {r.mlb_game_id for r in rows}
     total_runs = [((r.home_score or 0) + (r.away_score or 0)) for r in rows]
 
-    try:
-        pitches = statcast(start.isoformat(), (as_of_date - dt.timedelta(days=1)).isoformat())
-    except Exception as exc:
-        log.warning("Statcast pull failed for umpire zone history (%s) - returning partial result", exc)
+    # Slice the cached season pull locally instead of a fresh network call.
+    # Lookback windows that cross a calendar-year boundary (as_of_date early
+    # enough in the season that `start` falls in the prior year) will miss
+    # those prior-year pitches - same edge case already accepted by
+    # pitcher_features' season cache, and rare in practice since it only
+    # affects the first ~6 weeks of a season.
+    season_pitches = _season_league_pitches(as_of_date.year)
+    if season_pitches.empty:
         return {**empty, "n_games": len(rows), "over_under_lean": round(sum(total_runs) / len(total_runs), 2)}
 
+    pitch_dates = pd.to_datetime(season_pitches["game_date"]).dt.date
+    pitches = season_pitches[(pitch_dates >= start) & (pitch_dates < as_of_date)]
     if pitches.empty:
         return {**empty, "n_games": len(rows)}
 

@@ -9,14 +9,15 @@ below defaults to the logistic model unless you explicitly pass the
 XGBoost one.
 
 Feature caveat: the spec calls for "starter first-inning-specific ERA/WHIP"
-and "leadoff hitter OBP" - our schema (Section 5, as given) only stores
-game-level pitching/batting lines, not inning-level splits or lineup-slot-
-specific rate stats, so this reuses the same season-level starter/lineup/
-park features as the other targets (era_season, lineup_wOBA, park factors)
-rather than fabricating first-inning-specific numbers we don't have. Adding
-true first-inning splits would mean parsing play-by-play data
-(gamePk -> playByPlay endpoint), which is a reasonable follow-up but out of
-scope for this pass.
+and "leadoff hitter OBP". Leadoff OBP is now real (features/batter_features
+.compute_leadoff_obp, folded into home_lineup/away_lineup) - the confirmed
+or projected leadoff hitter's season-to-date OBP. Starter first-inning-
+specific ERA/WHIP is still a gap: our schema (Section 5, as given) only
+stores whole-game pitching lines, not inning-level splits, so this reuses
+the same season-level era_season the other targets use rather than
+fabricating a first-inning-specific number we don't have. Closing that
+gap needs play-by-play parsing (gamePk -> playByPlay endpoint) - a
+reasonable follow-up, still out of scope for this pass.
 """
 from __future__ import annotations
 
@@ -25,7 +26,9 @@ import logging
 
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.frozen import FrozenEstimator
 from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
@@ -49,10 +52,38 @@ def train_logistic(X_train: pd.DataFrame, y_train: pd.Series) -> CalibratedClass
     return model
 
 
-def train_xgboost(X_train: pd.DataFrame, y_train: pd.Series) -> XGBClassifier:
-    model = XGBClassifier(n_estimators=200, max_depth=3, learning_rate=0.05, eval_metric="logloss")
-    model.fit(X_train, y_train)
-    return model
+def train_xgboost(X_train: pd.DataFrame, y_train: pd.Series) -> CalibratedClassifierCV:
+    # Same early-stopping + calibration pattern as
+    # train_moneyline.train_xgboost_calibrated - this file's own docstring
+    # says probability comparison needs calibration, which previously only
+    # applied to the logistic model; an uncalibrated XGBoost here was an
+    # inconsistency, not a deliberate choice. The held-out 20% slice
+    # (chronological, not shuffled) serves double duty as the early-stopping
+    # eval set and the isotonic calibration set.
+    fit_X, calib_X, fit_y, calib_y = train_test_split(X_train, y_train, test_size=0.2, shuffle=False)
+
+    positive_ratio = float(y_train.mean())
+    negative_ratio = 1.0 - positive_ratio
+    scale_pos_weight = negative_ratio / positive_ratio if positive_ratio > 0 else 1.0
+
+    xgb = XGBClassifier(
+        n_estimators=400,
+        max_depth=4,
+        min_child_weight=3,
+        learning_rate=0.05,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        reg_lambda=1.0,
+        scale_pos_weight=scale_pos_weight,
+        eval_metric="logloss",
+        early_stopping_rounds=25,
+        random_state=42,
+    )
+    xgb.fit(fit_X, fit_y, eval_set=[(calib_X, calib_y)], verbose=False)
+
+    calibrated = CalibratedClassifierCV(FrozenEstimator(xgb), method="isotonic")
+    calibrated.fit(calib_X, calib_y)
+    return calibrated
 
 
 def predict_nrfi_probability(model, feature_row: pd.DataFrame) -> float:

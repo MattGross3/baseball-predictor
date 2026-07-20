@@ -93,7 +93,16 @@ def poisson_run_distribution(poisson_models: dict, feature_row: pd.DataFrame) ->
 def train_xgb_totals(train_df: pd.DataFrame) -> dict:
     X = _prep(train_df)
     y = train_df["label"]
-    model = XGBRegressor(n_estimators=300, max_depth=4, learning_rate=0.05)
+    model = XGBRegressor(
+        n_estimators=500,
+        max_depth=5,
+        min_child_weight=2,
+        learning_rate=0.04,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        reg_lambda=1.0,
+        random_state=42,
+    )
     model.fit(X, y)
 
     residuals = y - model.predict(X)

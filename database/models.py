@@ -265,3 +265,15 @@ class ModelRegistryEntry(Base):
     trained_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
     metrics_json: Mapped[dict] = mapped_column(JSON, default=dict)
     file_path: Mapped[str] = mapped_column(String(300))
+
+
+class ApiCallLog(Base):
+    """One row per outbound call to a metered external API - currently just
+    The Odds API's free tier (500 requests/month). See
+    ingestion/api_budget.py, which is what actually reads/writes this."""
+
+    __tablename__ = "api_call_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    api_name: Mapped[str] = mapped_column(String(50), index=True)
+    called_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), index=True)

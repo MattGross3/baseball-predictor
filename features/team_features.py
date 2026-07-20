@@ -24,7 +24,17 @@ def _season_games(db: Session, team_id: int, as_of_date: dt.date):
     ).scalars().all()
 
 
-def compute_team_features(db: Session, team_id: int, as_of_date: dt.date) -> dict:
+def compute_team_features(db: Session, team_id: int, as_of_date: dt.date, include_live_oaa: bool = True) -> dict:
+    """`include_live_oaa=False` forces oaa_defense_rating to None - see
+    `_oaa_rating`'s docstring for why this exists: Savant's leaderboard
+    can't be bounded to as_of_date, so during bulk historical training
+    (`build_training_matrix` always passes False here) using it would leak
+    the team's full *current* season defensive numbers - including games
+    played after as_of_date - into what's supposed to be a leakage-safe
+    training row. Live single-game prediction leaves this on, where it's
+    not leaky: mid-season, "full year to date" from Savant just *is*
+    "as of today," since the season hasn't finished yet.
+    """
     games = _season_games(db, team_id, as_of_date)
 
     wins = losses = runs_for = runs_against = 0
@@ -72,7 +82,7 @@ def compute_team_features(db: Session, team_id: int, as_of_date: dt.date) -> dic
             "home": round(home_wins / (home_wins + home_losses), 3) if (home_wins + home_losses) else None,
             "away": round(away_wins / (away_wins + away_losses), 3) if (away_wins + away_losses) else None,
         },
-        "oaa_defense_rating": _oaa_rating(db, team_id, as_of_date.year),
+        "oaa_defense_rating": _oaa_rating(db, team_id, as_of_date.year) if include_live_oaa else None,
     }
 
 
@@ -85,7 +95,18 @@ def _oaa_rating(db: Session, team_id: int, season: int) -> float | None:
     """Team OAA for the season from Baseball Savant. Savant's leaderboard
     uses short club names ("Angels") while our `teams.name` stores the full
     name ("Los Angeles Angels") from the MLB Stats API, so we match on
-    suffix rather than requiring a separate id-mapping table."""
+    suffix rather than requiring a separate id-mapping table.
+
+    Leakage note: Savant's `outs_above_average` endpoint accepts
+    startDate/endDate params that *look* like they'd bound this to
+    as_of_date, but empirically don't - passing a mid-season date range
+    returns identical numbers to the full-season query, so there's no way
+    to ask this endpoint for "OAA as of a past date." That's fine for live
+    use (mid-season, "full year" already means "as of today" since future
+    games haven't been played) but would leak end-of-season defensive
+    data into historical training rows - see compute_team_features's
+    include_live_oaa, which is how callers avoid that.
+    """
     table = _oaa_season_table(season)
     if table.empty:
         return None

@@ -24,6 +24,16 @@ class Settings(BaseSettings):
     odds_api_key: str = ""
     weather_api_key: str = ""
 
+    # The Odds API's free tier is 500 requests/month, hard stop (not a
+    # soft throttle) - going over either starts costing money or stops
+    # working. See ingestion/api_budget.py, which enforces this against
+    # `odds_api_monthly_limit - odds_api_safety_buffer`, and
+    # scheduler/daily_jobs.py's ODDS_POLL_INTERVAL_MINUTES for how the
+    # default polling cadence stays well under it by design rather than
+    # relying on the hard cap to save you.
+    odds_api_monthly_limit: int = 500
+    odds_api_safety_buffer: int = 50
+
     # Admin auth for POST /models/retrain - a shared-secret header, not a
     # full user/auth system, since this app has no other authenticated
     # endpoints. Leave blank in dev to disable the check entirely (see

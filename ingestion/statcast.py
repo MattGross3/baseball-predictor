@@ -55,28 +55,25 @@ def fetch_batter_statcast(batter_id: int, start_date: dt.date, end_date: dt.date
     return df if df is not None else pd.DataFrame()
 
 
-def compute_pitcher_statcast_summary(pitcher_id: int, as_of_date: dt.date, lookback_days: int = 30) -> dict:
-    """Rolling velocity/spin/whiff/pitch-mix summary as of a date.
+_EMPTY_PITCHER_SUMMARY = {
+    "avg_velo": None,
+    "avg_spin_rate": None,
+    "whiff_pct": None,
+    "swing_pct": None,
+    "primary_pitch_type": None,
+    "pitch_mix": {},
+    "n_pitches": 0,
+}
 
-    Returns zeros/None-filled dict (never raises) if no pitches are found,
-    so callers can build a full feature row even for pitchers with no
-    recent Statcast history (e.g. rookies, long IL stints).
-    """
-    start = as_of_date - dt.timedelta(days=lookback_days)
-    end = as_of_date - dt.timedelta(days=1)  # never include the target date itself - avoid leakage
-    df = fetch_pitcher_statcast(pitcher_id, start, end)
 
-    empty = {
-        "avg_velo": None,
-        "avg_spin_rate": None,
-        "whiff_pct": None,
-        "swing_pct": None,
-        "primary_pitch_type": None,
-        "pitch_mix": {},
-        "n_pitches": 0,
-    }
+def summarize_pitcher_statcast(df: pd.DataFrame) -> dict:
+    """Pure summary math over an already-fetched, already-date-filtered
+    pitch-level DataFrame - split out from `compute_pitcher_statcast_summary`
+    so a caller that fetches a wide range once (features/pitcher_features.py
+    caches a full season per pitcher, then slices+summarizes repeatedly per
+    start) doesn't need a fresh network call for every slice."""
     if df.empty:
-        return empty
+        return dict(_EMPTY_PITCHER_SUMMARY)
 
     swings = df[df["description"].isin(SWING_DESCRIPTIONS)]
     whiffs = df[df["description"].isin(WHIFF_DESCRIPTIONS)]
@@ -93,6 +90,22 @@ def compute_pitcher_statcast_summary(pitcher_id: int, as_of_date: dt.date, lookb
         "pitch_mix": pitch_mix,
         "n_pitches": int(len(df)),
     }
+
+
+def compute_pitcher_statcast_summary(pitcher_id: int, as_of_date: dt.date, lookback_days: int = 30) -> dict:
+    """Rolling velocity/spin/whiff/pitch-mix summary as of a date. Fetches
+    fresh every call - fine for one-off live use; see `summarize_pitcher_
+    statcast` if you're computing this repeatedly for the same pitcher and
+    want to fetch once and slice instead.
+
+    Returns zeros/None-filled dict (never raises) if no pitches are found,
+    so callers can build a full feature row even for pitchers with no
+    recent Statcast history (e.g. rookies, long IL stints).
+    """
+    start = as_of_date - dt.timedelta(days=lookback_days)
+    end = as_of_date - dt.timedelta(days=1)  # never include the target date itself - avoid leakage
+    df = fetch_pitcher_statcast(pitcher_id, start, end)
+    return summarize_pitcher_statcast(df)
 
 
 def compute_batter_statcast_summary(batter_id: int, as_of_date: dt.date, lookback_days: int = 30) -> dict:

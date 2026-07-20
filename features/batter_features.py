@@ -132,6 +132,30 @@ def compute_lineup_features(db: Session, team_id: int, game_id: int, as_of_date:
     }
 
 
+def compute_leadoff_obp(db: Session, team_id: int, game_id: int, as_of_date: dt.date) -> dict:
+    """Season-to-date OBP (as of the game) for whoever bats leadoff -
+    partial coverage of the NRFI feature gap train_nrfi.py's docstring
+    calls out ("leadoff hitter OBP" per Section 7.3), unlike the
+    starter's first-inning-specific ERA/WHIP the same docstring flags,
+    which still needs play-by-play parsing this pass doesn't do.
+
+    Same schema caveat as `_woba_proxy`: no HBP/sac-fly columns, so this
+    is (H+BB)/(AB+BB), not the textbook OBP denominator - close enough to
+    rank leadoff hitters against each other, not exact.
+    """
+    lineup_rows = _lineup_for_game(db, game_id, team_id)
+    leadoff_id = next((r.player_id for r in lineup_rows if r.batting_order_position == 1), None)
+    if leadoff_id is None:
+        projected = _projected_lineup(db, team_id, as_of_date, n=1)
+        leadoff_id = projected[0] if projected else None
+    if leadoff_id is None:
+        return {"leadoff_obp": None}
+
+    stats = _batter_season_stats(db, leadoff_id, as_of_date)
+    denom = stats["ab"] + stats["bb"]
+    return {"leadoff_obp": round((stats["h"] + stats["bb"]) / denom, 3) if denom else None}
+
+
 def _z_score(recent_woba: float, season_woba: float, assumed_league_std: float = 0.08) -> float | None:
     """Simplified z-score: how far the player's last-7-day rate sits from
     their own season rate, in units of a league-typical wOBA spread. A
