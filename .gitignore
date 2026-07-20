@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# model artifacts are large binaries; keep the dir but not contents
+models/registry/*
+!models/registry/.gitkeep
+
+# local data caches (pybaseball caches Statcast pulls to disk)
+.pybaseball_cache/
+
+.DS_Store
+*.log

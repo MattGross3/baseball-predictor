@@ -1,0 +1,84 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-baseball}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-baseball}
+      POSTGRES_DB: ${POSTGRES_DB:-baseball}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-baseball}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: applies Alembic migrations, then exits. api/scheduler/frontend
+  # all wait on this completing successfully rather than each racing to
+  # migrate (or worse, starting against an unmigrated schema) - Compose's
+  # `service_healthy` on postgres only means "accepting connections", not
+  # "our tables exist".
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: alembic upgrade head
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-baseball}:${POSTGRES_PASSWORD:-baseball}@postgres:5432/${POSTGRES_DB:-baseball}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-baseball}:${POSTGRES_PASSWORD:-baseball}@postgres:5432/${POSTGRES_DB:-baseball}
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./models/registry:/app/models/registry
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m scheduler.daily_jobs
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-baseball}:${POSTGRES_PASSWORD:-baseball}@postgres:5432/${POSTGRES_DB:-baseball}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./models/registry:/app/models/registry
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: streamlit run frontend/app.py --server.address 0.0.0.0 --server.port 8501
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-baseball}:${POSTGRES_PASSWORD:-baseball}@postgres:5432/${POSTGRES_DB:-baseball}
+      API_BASE_URL: http://api:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

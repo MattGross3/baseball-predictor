@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.git/
+.gitignore
+models/registry/*.pkl
+.pybaseball_cache/
+*.log
