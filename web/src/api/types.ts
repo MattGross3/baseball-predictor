@@ -203,3 +203,10 @@ export interface ModelInfo {
   trained_at: string
   metrics: Record<string, number>
 }
+
+export interface OddsRefreshResult {
+  written: number
+  calls_used_this_month: number
+  calls_remaining: number
+  message: string
+}

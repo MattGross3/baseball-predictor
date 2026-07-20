@@ -12,6 +12,9 @@ export function TodaySlate() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshMessage, setRefreshMessage] = useState<string | null>(null)
+
   useEffect(() => {
     let cancelled = false
     setLoading(true)
@@ -37,6 +40,28 @@ export function TodaySlate() {
     }
   }, [date])
 
+  function refreshOdds() {
+    setRefreshing(true)
+    setRefreshMessage(null)
+
+    api
+      .refreshOdds()
+      .then((result) => {
+        setRefreshMessage(`${result.message} (${result.calls_remaining} odds API calls left this month)`)
+        // Odds moved - re-pull the slate summary so Spread/Total/ML reflect
+        // the fresh snapshot instead of showing stale prices until the
+        // next date/page navigation.
+        return api.getGameSlateSummary(date)
+      })
+      .then((fetchedSummaries) => {
+        setSummaries(Object.fromEntries(fetchedSummaries.map((summary) => [summary.game_id, summary])))
+      })
+      .catch((err: unknown) => {
+        setRefreshMessage(err instanceof ApiError ? `API error (${err.status}): ${err.message}` : 'Could not reach the API.')
+      })
+      .finally(() => setRefreshing(false))
+  }
+
   return (
     <div>
       <div className="flex items-start justify-between mb-6 flex-wrap gap-3">
@@ -46,13 +71,26 @@ export function TodaySlate() {
             Expected win probability and predicted run total for each game.
           </p>
         </div>
-        <input
-          type="date"
-          value={date}
-          onChange={(e) => setDate(e.target.value)}
-          className="bg-[color:var(--color-surface-card)] border border-[color:var(--color-border)] rounded-lg px-3 py-2 text-sm"
-        />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={refreshOdds}
+            disabled={refreshing}
+            className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface-card)] px-3 py-2 text-sm font-medium hover:border-[color:var(--color-ink-muted)] transition-colors disabled:opacity-50"
+          >
+            {refreshing ? 'Refreshing odds…' : 'Refresh odds'}
+          </button>
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="bg-[color:var(--color-surface-card)] border border-[color:var(--color-border)] rounded-lg px-3 py-2 text-sm"
+          />
+        </div>
       </div>
+
+      {refreshMessage && (
+        <p className="text-xs text-[color:var(--color-ink-muted)] -mt-4 mb-6">{refreshMessage}</p>
+      )}
 
       {loading && <LoadingState label="Loading today's slate…" />}
       {!loading && error && <ErrorState message={error} />}

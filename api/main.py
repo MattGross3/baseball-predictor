@@ -11,7 +11,7 @@ import threading
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import backtest, games, models, predictions
+from api.routers import backtest, games, models, odds, predictions
 from config import settings
 from ingestion.umpire_scorecards import _season_league_pitches
 
@@ -60,6 +60,7 @@ app.include_router(games.router)
 app.include_router(predictions.router)
 app.include_router(backtest.router)
 app.include_router(models.router)
+app.include_router(odds.router)
 
 
 @app.get("/health")

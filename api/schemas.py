@@ -147,6 +147,13 @@ class BacktestResultOut(BaseModel):
     computed_at: dt.datetime | None = None
 
 
+class OddsRefreshOut(BaseModel):
+    written: int
+    calls_used_this_month: int
+    calls_remaining: int
+    message: str
+
+
 class ModelInfoOut(BaseModel):
     model_name: str
     target_type: str
