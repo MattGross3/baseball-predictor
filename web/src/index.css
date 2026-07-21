@@ -28,6 +28,17 @@
   --color-ink: #18181b;
   --color-ink-muted: #6b6b64;
   --color-ink-faint: #9a9a91;
+
+  /* Dark sidebar - the one deliberately dark surface in an otherwise
+     light app, matching the approved reference design's nav treatment.
+     Kept separate from the light --color-* tokens above rather than a
+     full dark-mode theme, since only the sidebar chrome is dark. */
+  --color-sidebar-bg: #12141c;
+  --color-sidebar-active-bg: #1e2536;
+  --color-sidebar-border: #232634;
+  --color-sidebar-ink: #e5e7eb;
+  --color-sidebar-ink-muted: #8b8fa3;
+  --color-sidebar-accent: #3b82f6;
 }
 
 html {

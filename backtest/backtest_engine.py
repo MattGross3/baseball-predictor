@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 FLAT_BET_SIZE = 100.0
 KELLY_FRACTION_CAP = 0.25  # cap Kelly stake at 25% of bankroll per bet - full Kelly is too aggressive for a single game's variance
 MIN_EDGE_TO_BET = 0.02  # require at least a 2-point edge over market-implied probability before "placing" a bet
+RUN_LINE_MIN_EDGE_RUNS = 0.5  # require the model's predicted margin to clear the run line by at least half a run before "placing" a spread bet
 
 
 def _latest_registry_entry(db: Session, model_name: str) -> ModelRegistryEntry:
@@ -99,6 +100,84 @@ def _simulate_moneyline_bets(db: Session, df: pd.DataFrame, y_prob: np.ndarray) 
         "roi_kelly": round(kelly_profit / kelly_staked, 4) if kelly_staked else None,
         "n_bets": n_bets,
         "bet_records": bet_records,
+    }
+
+
+def simulate_run_line_bets(db: Session, start_date: dt.date, end_date: dt.date) -> dict:
+    """Run-line ("spread") backtest over a date range.
+
+    Deliberately not parameterized by model_name the way run_backtest is -
+    a run-line pick needs a predicted *home/away split*, and only the
+    Poisson baseline (`totals_poisson`) actually produces one (XGBoost
+    predicts one combined number - see features/build_feature_matrix.py's
+    split_source fallback for the live-prediction version of this same
+    constraint), so this always uses whatever the latest totals_poisson
+    entry is.
+
+    Only ever stakes the *home* side: ingestion/odds_api._extract_best_lines
+    only stores the home side's run-line price, so betting "away" would
+    need a fabricated number. Games where the model favors away covering
+    still count toward win/loss (the model's *call* is still checkable
+    against the actual margin), just never get a real dollar bet.
+    """
+    empty = {"roi_flat_bet": None, "n_bets": 0, "wins": 0, "losses": 0, "n_games": 0}
+    try:
+        entry = _latest_registry_entry(db, "totals_poisson")
+    except ValueError:
+        return empty
+    bundle = load_model(entry.file_path)
+    model, feature_cols = bundle["model"], bundle["feature_columns"]
+    if not ("home" in model and "away" in model):
+        return empty  # registry entry isn't actually the Poisson bundle shape
+
+    df = build_training_matrix(db, start_date, end_date, target="total")
+    if df.empty:
+        return empty
+
+    from models.train_totals import poisson_run_distribution
+
+    X = df[feature_cols].apply(pd.to_numeric, errors="coerce") if set(feature_cols).issubset(df.columns) else df.reindex(columns=feature_cols)
+    X = X.reindex(columns=feature_cols, fill_value=0).fillna(0).astype(float)
+
+    flat_profit = flat_staked = 0.0
+    n_bets = wins = losses = n_games = 0
+
+    for i, row in df.reset_index(drop=True).iterrows():
+        odds_row = _earliest_odds(db, int(row["game_id"]))
+        if odds_row is None or odds_row.run_line is None:
+            continue
+
+        dist = poisson_run_distribution(model, X.iloc[[i]])
+        predicted_margin = dist["lambda_home"] - dist["lambda_away"]
+        actual_margin = row["home_score"] - row["away_score"]
+
+        # run_line is the home team's own line (see
+        # ingestion/odds_api._extract_best_lines) - home covers whenever
+        # margin + run_line > 0, for either the predicted or actual margin.
+        edge = predicted_margin + odds_row.run_line
+        pick_home_covers = edge > 0
+        actual_home_covers = (actual_margin + odds_row.run_line) > 0
+
+        n_games += 1
+        if pick_home_covers == actual_home_covers:
+            wins += 1
+        else:
+            losses += 1
+
+        if not pick_home_covers or abs(edge) < RUN_LINE_MIN_EDGE_RUNS or odds_row.run_line_odds is None:
+            continue
+
+        profit_per_dollar = _american_profit_per_dollar(odds_row.run_line_odds)
+        flat_staked += FLAT_BET_SIZE
+        flat_profit += FLAT_BET_SIZE * profit_per_dollar if actual_home_covers else -FLAT_BET_SIZE
+        n_bets += 1
+
+    return {
+        "roi_flat_bet": round(flat_profit / flat_staked, 4) if flat_staked else None,
+        "n_bets": n_bets,
+        "wins": wins,
+        "losses": losses,
+        "n_games": n_games,
     }
 
 

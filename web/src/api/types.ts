@@ -60,7 +60,7 @@ export interface Prediction {
 export interface GamePredictions {
   game_id: number
   predictions: Prediction[]
-  edge_vs_market: { model_probability_home: number; market_implied_probability_home: number; edge: number } | null
+  edge_vs_market: { model_probability_home: number; market_implied_probability_home: number; edge: number; expected_roi: number } | null
 }
 
 export interface Odds {
@@ -209,4 +209,14 @@ export interface OddsRefreshResult {
   calls_used_this_month: number
   calls_remaining: number
   message: string
+}
+
+export interface SpreadResult {
+  date_range: string
+  roi_flat_bet: number | null
+  n_bets: number
+  n_games: number
+  wins: number
+  losses: number
+  computed_at: string | null
 }

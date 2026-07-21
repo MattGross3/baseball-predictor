@@ -1,4 +1,4 @@
-import type { BacktestResult, Game, GameFeaturesResponse, GamePredictions, GameSlateSummary, ModelInfo, OddsRefreshResult, Prediction } from './types'
+import type { BacktestResult, Game, GameFeaturesResponse, GamePredictions, GameSlateSummary, ModelInfo, OddsRefreshResult, Prediction, SpreadResult } from './types'
 
 // In dev, Vite proxies /api/* to the FastAPI backend (see vite.config.ts) -
 // same trick nginx.conf uses in production (see web/Dockerfile). Neither
@@ -50,6 +50,8 @@ export const api = {
   backtestResults: (model: string, dateRange: string, refresh?: boolean) =>
     get<BacktestResult>('/backtest/results', { model, date_range: dateRange, refresh: refresh ? 'true' : undefined }),
   backtestSeasons: () => get<number[]>('/backtest/seasons'),
+  spreadResults: (dateRange: string, refresh?: boolean) =>
+    get<SpreadResult>('/backtest/spread-results', { date_range: dateRange, refresh: refresh ? 'true' : undefined }),
   listModels: () => get<ModelInfo[]>('/models'),
   refreshOdds: () => post<OddsRefreshResult>('/odds/refresh'),
 }

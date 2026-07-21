@@ -8,12 +8,19 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy import extract, select
 from sqlalchemy.orm import Session
 
-from api.schemas import BacktestResultOut
-from backtest.backtest_engine import run_backtest
+from api.schemas import BacktestResultOut, SpreadResultOut
+from backtest.backtest_engine import run_backtest, simulate_run_line_bets
 from database.db import get_db
 from database.models import BacktestCache, Game
 
 router = APIRouter(prefix="/backtest", tags=["backtest"])
+
+# Synthetic "model name" for caching the run-line/spread simulation in the
+# same backtest_cache table /backtest/results uses - spread betting isn't
+# a registered model (it rides on totals_poisson's home/away split, see
+# backtest_engine.simulate_run_line_bets), so there's no real model_name
+# to key on, but reusing the existing cache table avoids a second one.
+SPREAD_CACHE_KEY = "run_line_spread"
 
 
 @router.get("/seasons", response_model=list[int])
@@ -74,3 +81,44 @@ def backtest_results(
     db.commit()
 
     return BacktestResultOut(**result, computed_at=cached.computed_at)
+
+
+@router.get("/spread-results", response_model=SpreadResultOut)
+def spread_results(
+    date_range: str = Query(..., description="YYYY-MM-DD,YYYY-MM-DD"),
+    refresh: bool = Query(False, description="Recompute instead of serving a cached result"),
+    db: Session = Depends(get_db),
+):
+    """Run-line ("spread") backtest - see backtest_engine.simulate_run_line_bets
+    for why this isn't just another /backtest/results?model=... call: a
+    spread pick needs a predicted home/away split, which only the Poisson
+    totals baseline produces, not a registered model of its own. Cached
+    the same way /backtest/results is, under a synthetic model name.
+    """
+    try:
+        start_str, end_str = date_range.split(",")
+        start_date, end_date = dt.date.fromisoformat(start_str), dt.date.fromisoformat(end_str)
+    except ValueError as exc:
+        raise HTTPException(400, "date_range must be 'YYYY-MM-DD,YYYY-MM-DD'") from exc
+
+    cached = db.execute(
+        select(BacktestCache).where(
+            BacktestCache.model_name == SPREAD_CACHE_KEY,
+            BacktestCache.start_date == start_date,
+            BacktestCache.end_date == end_date,
+        )
+    ).scalar_one_or_none()
+    if cached is not None and not refresh:
+        return SpreadResultOut(**cached.result_json, computed_at=cached.computed_at)
+
+    result = simulate_run_line_bets(db, start_date, end_date)
+    result["date_range"] = f"{start_date}..{end_date}"
+
+    if cached is None:
+        cached = BacktestCache(model_name=SPREAD_CACHE_KEY, start_date=start_date, end_date=end_date)
+        db.add(cached)
+    cached.result_json = jsonable_encoder(result)
+    cached.computed_at = dt.datetime.now(dt.timezone.utc)
+    db.commit()
+
+    return SpreadResultOut(**result, computed_at=cached.computed_at)

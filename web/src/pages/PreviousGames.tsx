@@ -81,6 +81,7 @@ export function PreviousGames() {
     <div>
       <div className="flex items-start justify-between mb-6 flex-wrap gap-3">
         <div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-home)] mb-1">History</div>
           <h1 className="text-3xl font-bold tracking-tight">Previous Games</h1>
           <p className="text-sm text-[color:var(--color-ink-muted)] mt-1">Final results vs. what the model predicted going in.</p>
         </div>

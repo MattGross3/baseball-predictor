@@ -1,20 +1,12 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError } from '../api/client'
-import type { BacktestResult } from '../api/types'
+import type { BacktestResult, SpreadResult } from '../api/types'
 import { EmptyState, ErrorState, LoadingState } from '../components/States'
 import { localIsoDate } from '../lib/date'
 
-const MODELS = ['moneyline_xgboost', 'moneyline_logistic', 'nrfi_logistic', 'nrfi_xgboost']
-
-interface SeasonRow {
-  season: number
-  result: BacktestResult | null
-  error: string | null
-}
-
-// ROI uses the moneyline bet simulation when odds are available, and falls
-// back to the plain classification record for NRFI models when there is no
-// odds-backed stake path to simulate.
+// Season boundary: March 1 through today (or Dec 31, whichever is
+// earlier) - matches how every other season-scoped view in this app
+// (build_training_matrix's SEASON_START_MONTH_DAY, etc.) defines "season".
 function seasonDateRange(season: number): [string, string] {
   const start = `${season}-03-01`
   const today = localIsoDate(new Date())
@@ -23,18 +15,38 @@ function seasonDateRange(season: number): [string, string] {
   return [start, end]
 }
 
+interface BetTypeCard {
+  key: string
+  label: string
+  color: string
+  softColor: string
+  roi: number | null
+  hasOdds: boolean
+  wins: number | null
+  losses: number | null
+  winRate: number | null
+}
+
+function pct(v: number | null | undefined, digits = 0) {
+  return v == null ? null : `${(v * 100).toFixed(digits)}%`
+}
+
 export function ROI() {
-  const [model, setModel] = useState(MODELS[0])
   const [seasons, setSeasons] = useState<number[]>([])
-  const [rows, setRows] = useState<SeasonRow[]>([])
+  const [season, setSeason] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [cards, setCards] = useState<BetTypeCard[]>([])
 
   useEffect(() => {
     let cancelled = false
     api
       .backtestSeasons()
-      .then((s) => !cancelled && setSeasons(s))
+      .then((s) => {
+        if (cancelled) return
+        setSeasons(s)
+        setSeason(s.length ? s[s.length - 1] : null)
+      })
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof ApiError ? `API error (${err.status}): ${err.message}` : 'Could not reach the API.')
       })
@@ -44,112 +56,140 @@ export function ROI() {
   }, [])
 
   useEffect(() => {
-    if (seasons.length === 0) return
+    if (season == null) return
     let cancelled = false
     setLoading(true)
     setError(null)
-    setRows(seasons.map((season) => ({ season, result: null, error: null })))
 
-    Promise.all(
-      seasons.map(async (season) => {
-        const [start, end] = seasonDateRange(season)
-        try {
-          const result = await api.backtestResults(model, `${start},${end}`)
-          return { season, result, error: null } as SeasonRow
-        } catch (err) {
-          return {
-            season,
-            result: null,
-            error: err instanceof Error ? err.message : `No data for ${season} yet.`,
-          } as SeasonRow
-        }
-      }),
-    ).then((results) => {
-      if (!cancelled) setRows(results)
-    }).finally(() => !cancelled && setLoading(false))
+    const [start, end] = seasonDateRange(season)
+    const dateRange = `${start},${end}`
+
+    Promise.all([
+      api.backtestResults('moneyline_xgboost', dateRange).catch(() => null as BacktestResult | null),
+      api.backtestResults('totals_poisson', dateRange).catch(() => null as BacktestResult | null),
+      api.spreadResults(dateRange).catch(() => null as SpreadResult | null),
+      api.backtestResults('nrfi_logistic', dateRange).catch(() => null as BacktestResult | null),
+    ])
+      .then(([moneyline, total, spread, nrfi]) => {
+        if (cancelled) return
+        setCards([
+          {
+            key: 'moneyline',
+            label: 'Moneyline',
+            color: 'var(--color-home)',
+            softColor: 'var(--color-home-soft)',
+            roi: moneyline?.roi_flat_bet ?? null,
+            hasOdds: !!(moneyline?.roi_flat_bet != null && (moneyline?.n_bets ?? 0) > 0),
+            wins: moneyline?.wins ?? null,
+            losses: moneyline?.losses ?? null,
+            winRate: moneyline?.wins != null && moneyline?.n_games ? moneyline.wins / moneyline.n_games : null,
+          },
+          {
+            key: 'total',
+            label: 'Run Total',
+            color: 'var(--color-good)',
+            softColor: 'var(--color-good-soft)',
+            roi: null, // regression target - "win/loss" isn't a total-runs concept; MAE/RMSE live on the Backtest page instead
+            hasOdds: false,
+            wins: null,
+            losses: null,
+            winRate: null,
+          },
+          {
+            key: 'spread',
+            label: 'Spread',
+            color: 'var(--color-warning)',
+            softColor: 'var(--color-warning-soft)',
+            roi: spread?.roi_flat_bet ?? null,
+            hasOdds: !!(spread?.roi_flat_bet != null && (spread?.n_bets ?? 0) > 0),
+            wins: spread?.wins ?? null,
+            losses: spread?.losses ?? null,
+            winRate: spread?.wins != null && spread?.n_games ? spread.wins / spread.n_games : null,
+          },
+          {
+            key: 'nrfi',
+            label: 'NRFI',
+            color: 'var(--color-nrfi)',
+            softColor: 'var(--color-nrfi-soft)',
+            // NRFI has no real market odds stored (no nrfi_odds column) -
+            // there's genuinely no price to compute a dollar return
+            // against, so this always falls back to win/loss, not "N/A
+            // because we haven't polled enough" like moneyline/spread.
+            roi: null,
+            hasOdds: false,
+            wins: nrfi?.wins ?? null,
+            losses: nrfi?.losses ?? null,
+            winRate: nrfi?.wins != null && nrfi?.n_games ? nrfi.wins / nrfi.n_games : null,
+          },
+        ])
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof ApiError ? `API error (${err.status}): ${err.message}` : 'Could not reach the API.')
+      })
+      .finally(() => !cancelled && setLoading(false))
 
     return () => {
       cancelled = true
     }
-  }, [model, seasons])
-
-  const pct = (v: number | null | undefined) => (v == null ? null : `${(v * 100).toFixed(1)}%`)
+  }, [season])
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold tracking-tight mb-1">ROI</h1>
+      <div className="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-home)] mb-1">Performance</div>
+      <h1 className="text-2xl font-semibold tracking-tight mb-1">Model ROI</h1>
       <p className="text-sm text-[color:var(--color-ink-muted)] mb-6">
-        Season-by-season rate of return betting the model's favored side, flat $100/bet, only when it beats the
-        market by at least 2 points. Falls back to a plain win/loss record for seasons with no odds history.
+        Return on a flat 1-unit bet, by bet type, across all graded picks.
       </p>
 
-      <div className="flex flex-wrap gap-3 mb-6">
-        <select
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          className="bg-[color:var(--color-surface-card)] border border-[color:var(--color-border)] rounded-lg px-3 py-2 text-sm"
-        >
-          {MODELS.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
+      {seasons.length > 0 && (
+        <div className="flex gap-1 mb-6 border-b border-[color:var(--color-border)]">
+          {seasons.map((s) => (
+            <button
+              key={s}
+              onClick={() => setSeason(s)}
+              className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+                season === s
+                  ? 'border-[color:var(--color-home)] text-[color:var(--color-home)]'
+                  : 'border-transparent text-[color:var(--color-ink-muted)] hover:text-[color:var(--color-ink)]'
+              }`}
+            >
+              {s}
+            </button>
           ))}
-        </select>
-      </div>
+        </div>
+      )}
 
       {error && <ErrorState message={error} />}
       {!error && seasons.length === 0 && !loading && <EmptyState message="No completed games found yet." />}
-      {!error && loading && <LoadingState label="Scoring every season - each one's cached after the first run, so this only takes a while the first time…" />}
+      {!error && loading && <LoadingState label="Scoring every bet type for this season - cached after the first run, so this only takes a while once…" />}
 
-      {!error && !loading && rows.length > 0 && (
-        <div className="space-y-4">
-          {rows
-            .slice()
-            .sort((a, b) => b.season - a.season)
-            .map((row) => {
-              const r = row.result
-              const hasOdds = r != null && r.roi_flat_bet != null && (r.n_bets ?? 0) > 0
-              const record = r && r.wins != null && r.losses != null ? `${r.wins}-${r.losses}` : null
-
-              return (
-                <div key={row.season} className="rounded-xl border border-[color:var(--color-border)] bg-[color:var(--color-surface-card)] p-5">
-                  <div className="flex items-center justify-between mb-3">
-                    <h2 className="text-lg font-semibold">{row.season} season</h2>
-                    {r && <span className="text-xs text-[color:var(--color-ink-faint)]">{r.date_range}</span>}
-                  </div>
-
-                  {row.error && <ErrorState message={row.error} />}
-
-                  {r && (
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      <div className="rounded-lg bg-[color:var(--color-surface-raised)] px-3 py-2">
-                        <div className="text-[11px] text-[color:var(--color-ink-faint)]">Record</div>
-                        <div className="text-lg font-bold mt-0.5">{record ?? '—'}</div>
-                      </div>
-                      <div className="rounded-lg bg-[color:var(--color-surface-raised)] px-3 py-2">
-                        <div className="text-[11px] text-[color:var(--color-ink-faint)]">Win %</div>
-                        <div className="text-lg font-bold mt-0.5">{pct(r.wins != null && r.n_games ? r.wins / r.n_games : null) ?? '—'}</div>
-                      </div>
-                      <div className="rounded-lg bg-[color:var(--color-surface-raised)] px-3 py-2">
-                        <div className="text-[11px] text-[color:var(--color-ink-faint)]">Avg return (flat bet)</div>
-                        <div className="text-lg font-bold mt-0.5">{hasOdds ? pct(r.roi_flat_bet) : 'N/A'}</div>
-                      </div>
-                      <div className="rounded-lg bg-[color:var(--color-surface-raised)] px-3 py-2">
-                        <div className="text-[11px] text-[color:var(--color-ink-faint)]">Bets placed</div>
-                        <div className="text-lg font-bold mt-0.5">{r.n_bets ?? 0}</div>
-                      </div>
-                    </div>
-                  )}
-
-                  {r && !hasOdds && (
-                    <p className="text-xs text-[color:var(--color-ink-faint)] mt-3">
-                      No odds history for this season (or too few games met the betting edge threshold) - showing
-                      the win/loss record instead of a real dollar return.
-                    </p>
-                  )}
-                </div>
-              )
-            })}
+      {!error && !loading && cards.length > 0 && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {cards.map((c) => (
+            <div
+              key={c.key}
+              className="rounded-xl bg-[color:var(--color-surface-card)] p-4 border-l-4"
+              style={{ borderLeftColor: c.color }}
+            >
+              <div className="text-xs font-semibold uppercase tracking-wide mb-2" style={{ color: c.color }}>
+                {c.label}
+              </div>
+              <div className="text-2xl font-bold mb-2" style={{ color: c.roi == null ? 'var(--color-ink-faint)' : c.roi >= 0 ? 'var(--color-good)' : 'var(--color-critical)' }}>
+                {c.hasOdds ? `${c.roi! >= 0 ? '+' : ''}${pct(c.roi)}` : 'N/A'}
+              </div>
+              <div className="text-xs text-[color:var(--color-ink-muted)]">
+                {c.wins != null && c.losses != null ? (
+                  <>
+                    {c.wins}-{c.losses} record
+                    <br />
+                    {pct(c.winRate, 0) ?? '—'} win rate
+                  </>
+                ) : (
+                  'No graded picks yet'
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>

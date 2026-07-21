@@ -21,7 +21,7 @@ function starterStats(s: StarterFeatures) {
   ]
 }
 
-const TABS = ['Predictions', 'Feature breakdown'] as const
+const TABS = ['Predictions', 'Feature breakdown', "How it's calculated"] as const
 
 export function GameDetail() {
   const { gameId } = useParams<{ gameId: string }>()
@@ -29,6 +29,7 @@ export function GameDetail() {
 
   const [game, setGame] = useState<Game | null>(null)
   const [predictions, setPredictions] = useState<Prediction[]>([])
+  const [edgeVsMarket, setEdgeVsMarket] = useState<{ model_probability_home: number; market_implied_probability_home: number; edge: number; expected_roi: number } | null>(null)
   const [features, setFeatures] = useState<GameFeatures | null>(null)
   const [featuresComputedAt, setFeaturesComputedAt] = useState<string | null>(null)
   const [featuresLoading, setFeaturesLoading] = useState(false)
@@ -56,6 +57,7 @@ export function GameDetail() {
         if (cancelled) return
         setGame(g)
         setPredictions(p.predictions)
+        setEdgeVsMarket(p.edge_vs_market)
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -111,7 +113,8 @@ export function GameDetail() {
         ← Today's Slate
       </Link>
 
-      <div className="mt-3 mb-6 flex items-center gap-3">
+      <div className="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-home)] mt-3 mb-1">Matchup</div>
+      <div className="mb-6 flex items-center gap-3">
         <TeamBadge abbr={game.away_team.abbreviation} size={36} />
         <h1 className="text-2xl font-bold tracking-tight">
           {game.away_team.abbreviation} @ {game.home_team.abbreviation}
@@ -124,12 +127,23 @@ export function GameDetail() {
           ` · Final ${game.away_team.abbreviation} ${game.away_score} - ${game.home_team.abbreviation} ${game.home_score}`}
       </p>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-        <MetricCard label={`${game.home_team.abbreviation} expected win %`} value={homeProb != null ? `${Math.round(homeProb * 100)}%` : '—'} />
-        <MetricCard label={`${game.away_team.abbreviation} expected win %`} value={homeProb != null ? `${Math.round((1 - homeProb) * 100)}%` : '—'} />
-        <MetricCard label="Predicted total runs" value={totalSplit} />
-        <MetricCard label="NRFI probability" value={nrfi?.predicted_probability != null ? `${Math.round(nrfi.predicted_probability * 100)}%` : '—'} />
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+        <MetricCard label={`${game.home_team.abbreviation} win %`} value={homeProb != null ? `${Math.round(homeProb * 100)}%` : '—'} />
+        <MetricCard label={`${game.away_team.abbreviation} win %`} value={homeProb != null ? `${Math.round((1 - homeProb) * 100)}%` : '—'} />
+        <MetricCard label="Predicted total" value={totalSplit} />
+        <MetricCard
+          label="Expected ROI (flat bet)"
+          value={edgeVsMarket?.expected_roi != null ? `${edgeVsMarket.expected_roi >= 0 ? '+' : ''}${Math.round(edgeVsMarket.expected_roi * 100)}%` : 'N/A'}
+          tone={edgeVsMarket?.expected_roi != null ? (edgeVsMarket.expected_roi >= 0 ? 'good' : 'critical') : undefined}
+        />
       </div>
+
+      <p className="text-sm text-[color:var(--color-ink-muted)] mb-6">
+        NRFI (no runs first inning) probability:{' '}
+        <span className="font-semibold text-[color:var(--color-ink)]">
+          {nrfi?.predicted_probability != null ? `${Math.round(nrfi.predicted_probability * 100)}%` : '—'}
+        </span>
+      </p>
 
       <div className="border-b border-[color:var(--color-border)] mb-6 flex gap-6">
         {TABS.map((t) => (
@@ -159,19 +173,30 @@ export function GameDetail() {
                   <th className="px-4 py-3">Model</th>
                   <th className="px-4 py-3">Probability</th>
                   <th className="px-4 py-3">Value</th>
+                  <th className="px-4 py-3">ROI</th>
                   <th className="px-4 py-3">Generated</th>
                 </tr>
               </thead>
               <tbody>
-                {predictions.map((p) => (
-                  <tr key={p.id} className="border-b border-[color:var(--color-border)] last:border-0">
-                    <td className="px-4 py-3 font-semibold capitalize">{p.target_type}</td>
-                    <td className="px-4 py-3 text-[color:var(--color-ink-muted)]">{p.model_version}</td>
-                    <td className="px-4 py-3">{p.predicted_probability != null ? `${Math.round(p.predicted_probability * 100)}%` : '—'}</td>
-                    <td className="px-4 py-3">{p.predicted_value != null ? p.predicted_value.toFixed(1) : '—'}</td>
-                    <td className="px-4 py-3 text-[color:var(--color-ink-faint)]">{new Date(p.created_at).toLocaleString()}</td>
-                  </tr>
-                ))}
+                {predictions.map((p) => {
+                  // Expected ROI is only a real, computable number for
+                  // moneyline (needs a market price to bet against - see
+                  // api/routers/games._compute_edge_vs_market) - total/NRFI
+                  // rows show N/A rather than a fabricated figure.
+                  const roi = p.target_type === 'moneyline' ? edgeVsMarket?.expected_roi : null
+                  return (
+                    <tr key={p.id} className="border-b border-[color:var(--color-border)] last:border-0">
+                      <td className="px-4 py-3 font-semibold capitalize">{p.target_type}</td>
+                      <td className="px-4 py-3 text-[color:var(--color-ink-muted)]">{p.model_version}</td>
+                      <td className="px-4 py-3">{p.predicted_probability != null ? `${Math.round(p.predicted_probability * 100)}%` : '—'}</td>
+                      <td className="px-4 py-3">{p.predicted_value != null ? p.predicted_value.toFixed(1) : '—'}</td>
+                      <td className={`px-4 py-3 font-medium ${roi != null ? (roi >= 0 ? 'text-[color:var(--color-good)]' : 'text-[color:var(--color-critical)]') : 'text-[color:var(--color-warning)]'}`}>
+                        {roi != null ? `${roi >= 0 ? '+' : ''}${Math.round(roi * 100)}%` : 'N/A'}
+                      </td>
+                      <td className="px-4 py-3 text-[color:var(--color-ink-faint)]">{new Date(p.created_at).toLocaleString()}</td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -290,6 +315,46 @@ export function GameDetail() {
             </Panel>
           </div>
         </div>
+        </div>
+      )}
+
+      {tab === "How it's calculated" && (
+        <div className="rounded-xl border border-[color:var(--color-border)] bg-[color:var(--color-surface-card)] p-6 space-y-4 text-sm text-[color:var(--color-ink-muted)] max-w-3xl">
+          <div>
+            <h3 className="font-semibold text-[color:var(--color-ink)] mb-1">Moneyline &amp; NRFI</h3>
+            <p>
+              An <code className="text-xs">XGBClassifier</code> (falling back to a calibrated logistic regression
+              when XGBoost hasn't shown a real improvement) trained on starter and bullpen form, team win rates,
+              lineup quality, park factors, and market pricing where available. Both are wrapped in isotonic
+              calibration so a "65%" prediction actually wins about 65% of the time - required for comparing
+              against the market's own probability.
+            </p>
+          </div>
+          <div>
+            <h3 className="font-semibold text-[color:var(--color-ink)] mb-1">Run total</h3>
+            <p>
+              Two independent Poisson distributions (one per team) convolved into a full distribution over
+              possible totals, or an <code className="text-xs">XGBRegressor</code> predicting the combined total
+              directly - whichever backtests better wins. See the <Link to="/models" className="text-[color:var(--color-home)] hover:underline">Models</Link> page for current metrics.
+            </p>
+          </div>
+          <div>
+            <h3 className="font-semibold text-[color:var(--color-ink)] mb-1">Expected ROI</h3>
+            <p>
+              Bet $1 on whichever side the model favors, at that side's real market price: <code className="text-xs">model_win_prob × profit_per_dollar − (1 − model_win_prob)</code>.
+              This is a real expected-value calculation, not a backtested result - it assumes the model's own
+              probability is correct, which the <Link to="/roi" className="text-[color:var(--color-home)] hover:underline">Model ROI</Link> page's held-out track record is what actually
+              validates (or doesn't).
+            </p>
+          </div>
+          <div>
+            <h3 className="font-semibold text-[color:var(--color-ink)] mb-1">Market edge</h3>
+            <p>
+              Sportsbook prices always imply more than 100% combined probability (the "vig") - the model's
+              probability is compared against the de-vigged, normalized fair probability, not the raw market
+              number, so the edge shown isn't inflated by the book's own margin.
+            </p>
+          </div>
         </div>
       )}
     </div>

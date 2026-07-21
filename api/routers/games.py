@@ -281,8 +281,22 @@ def _compute_edge_vs_market(db: Session, game_id: int, predictions: list[Predict
         american_to_implied_prob(latest_odds.moneyline_home),
         american_to_implied_prob(latest_odds.moneyline_away),
     )
+    model_prob_home = moneyline_pred.predicted_probability
+
+    # Expected ROI: a real expected-value calculation (not just the
+    # fair-probability edge above) - bet $1 on whichever side the model
+    # favors, at that side's *actual* market price (not the devigged fair
+    # price; you can only ever bet the real number a book offers).
+    if model_prob_home >= 0.5:
+        price, win_prob = latest_odds.moneyline_home, model_prob_home
+    else:
+        price, win_prob = latest_odds.moneyline_away, 1 - model_prob_home
+    profit_per_dollar = price / 100 if price > 0 else 100 / abs(price)
+    expected_roi = round(win_prob * profit_per_dollar - (1 - win_prob), 4)
+
     return {
-        "model_probability_home": moneyline_pred.predicted_probability,
+        "model_probability_home": model_prob_home,
         "market_implied_probability_home": round(home_fair, 4),
-        "edge": round(moneyline_pred.predicted_probability - home_fair, 4),
+        "edge": round(model_prob_home - home_fair, 4),
+        "expected_roi": expected_roi,
     }

@@ -66,6 +66,7 @@ export function TodaySlate() {
     <div>
       <div className="flex items-start justify-between mb-6 flex-wrap gap-3">
         <div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-[color:var(--color-home)] mb-1">Today</div>
           <h1 className="text-3xl font-bold tracking-tight">Today's Slate</h1>
           <p className="text-sm text-[color:var(--color-ink-muted)] mt-1">
             Expected win probability and predicted run total for each game.

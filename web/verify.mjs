@@ -24,12 +24,12 @@ for (const p of pages) {
   // /backtest and /compare both trigger a live backtest run server-side
   // (full feature rebuild per game) - the default 30s nav timeout is too
   // tight for that even with the umpire/pitcher Statcast season caches
-  // warm, so give those two more room. /roi is the same call repeated
-  // per season (two full seasons' worth of games, not a 7-day slice),
+  // warm, so give those two more room. /roi fires 4 of those calls
+  // concurrently (moneyline/total/spread/nrfi) for a full season each,
   // uncached the first time this exact range is ever requested, so it
   // gets the longest allowance. The page itself shows a loading state
   // well within these timeouts; this is purely the test's own patience.
-  const timeout = p.path === '/roi' ? 180000 : p.path === '/backtest' || p.path === '/compare' ? 60000 : 30000
+  const timeout = p.path === '/roi' ? 300000 : p.path === '/backtest' || p.path === '/compare' ? 60000 : 30000
   await page.goto(base + p.path, { waitUntil: 'networkidle', timeout })
   await page.waitForTimeout(1500)
   await page.screenshot({ path: `verify_${p.name}.png`, fullPage: true })
@@ -46,7 +46,7 @@ if (await firstCard.count()) {
   await page.waitForURL(/\/games\/\d+/)
   // Predictions tab is already-computed DB data - should render fast now
   // that it no longer waits on the Feature breakdown tab's live fetch.
-  await page.getByText('expected win %').first().waitFor({ timeout: 10000 })
+  await page.getByText('Predicted total').first().waitFor({ timeout: 10000 })
   await page.getByText('Predictions', { exact: true }).waitFor({ timeout: 10000 })
   await page.waitForTimeout(500)
   await page.screenshot({ path: 'verify_game-detail.png', fullPage: true })

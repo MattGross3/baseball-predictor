@@ -30,7 +30,7 @@ function signedNumber(n: number | null | undefined): string {
   return n > 0 ? `+${n}` : `${n}`
 }
 
-const COLUMN_HEADERS = ['Predicted Score / ML', 'Spread', 'Total', 'NRFI'] as const
+const COLUMN_HEADERS = ['Score / ML', 'Spread / Run Line', 'Total / O-U', 'NRFI'] as const
 
 interface Props {
   game: Game
@@ -56,6 +56,10 @@ export function GameRow({ game, summary }: Props) {
   const runLinePick = summary?.run_line_pick_side ?? null
   const totalPick = summary?.pick_type === 'over' || summary?.pick_type === 'under' ? summary.pick_type : null
 
+  const homeWinProb = summary?.moneyline_probability ?? null
+  const awayPct = homeWinProb != null ? Math.round((1 - homeWinProb) * 100) : null
+  const homePct = homeWinProb != null ? Math.round(homeWinProb * 100) : null
+
   const eraWhip = (era: number | null | undefined, whip: number | null | undefined) =>
     era != null || whip != null ? `ERA ${era != null ? era.toFixed(2) : '—'} · WHIP ${whip != null ? whip.toFixed(2) : '—'}` : null
 
@@ -76,7 +80,7 @@ export function GameRow({ game, summary }: Props) {
               </div>
             )}
           </div>
-          <div className="text-[10px] text-[color:var(--color-ink-faint)] leading-tight">vs</div>
+          <div className="text-[10px] text-[color:var(--color-ink-faint)] leading-tight uppercase">at</div>
           <div>
             <div className="font-bold text-sm leading-tight">{game.home_team.abbreviation}</div>
             {summary?.home_starter_name && (
@@ -118,7 +122,7 @@ export function GameRow({ game, summary }: Props) {
                   {awayRunLine != null ? signedNumber(awayRunLine) : '—'}
                 </Cell>
                 <Cell highlighted={totalPick === 'under'}>
-                  {total != null ? `U ${total} ${americanOdds(odds?.under_odds)}` : '—'}
+                  {total != null ? `U ${total} (${americanOdds(odds?.under_odds)})` : '—'}
                 </Cell>
                 <Cell highlighted={nrfiProb != null && nrfiProb < 0.5}>No</Cell>
               </tr>
@@ -130,12 +134,24 @@ export function GameRow({ game, summary }: Props) {
                   {homeRunLine != null ? `${signedNumber(homeRunLine)} (${americanOdds(odds?.run_line_odds)})` : '—'}
                 </Cell>
                 <Cell highlighted={totalPick === 'over'}>
-                  {total != null ? `O ${total} ${americanOdds(odds?.over_odds)}` : '—'}
+                  {total != null ? `O ${total} (${americanOdds(odds?.over_odds)})` : '—'}
                 </Cell>
                 <Cell highlighted={nrfiProb != null && nrfiProb >= 0.5}>Yes</Cell>
               </tr>
             </tbody>
           </table>
+
+          {homePct != null && awayPct != null && (
+            <div className="flex items-center gap-3 mt-3 px-1">
+              <div className="flex-1 h-1.5 rounded-full overflow-hidden bg-[color:var(--color-border)] flex">
+                <div className="h-full bg-[color:var(--color-ink-faint)]" style={{ width: `${awayPct}%` }} />
+                <div className="h-full bg-[color:var(--color-home)]" style={{ width: `${homePct}%` }} />
+              </div>
+              <span className="text-xs font-medium text-[color:var(--color-ink-muted)] shrink-0 tabular-nums">
+                {awayPct}% / {homePct}%
+              </span>
+            </div>
+          )}
         </div>
 
         <Link
@@ -157,8 +173,10 @@ function Cell({ highlighted, children }: { highlighted: boolean; children: React
   return (
     <td className="px-1 py-1.5">
       <div
-        className={`rounded-lg text-center font-semibold text-xs py-1.5 px-2 whitespace-nowrap bg-[color:var(--color-surface-raised)] text-[color:var(--color-ink)] border ${
-          highlighted ? 'border-[color:var(--color-ink)]' : 'border-transparent'
+        className={`rounded-lg text-center font-semibold text-xs py-1.5 px-2 whitespace-nowrap border ${
+          highlighted
+            ? 'bg-[color:var(--color-home-soft)] text-[color:var(--color-home)] border-[color:var(--color-home)]'
+            : 'bg-[color:var(--color-surface-raised)] text-[color:var(--color-ink)] border-transparent'
         }`}
       >
         {children}

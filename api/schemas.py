@@ -147,6 +147,16 @@ class BacktestResultOut(BaseModel):
     computed_at: dt.datetime | None = None
 
 
+class SpreadResultOut(BaseModel):
+    date_range: str
+    roi_flat_bet: float | None = None
+    n_bets: int
+    n_games: int
+    wins: int
+    losses: int
+    computed_at: dt.datetime | None = None
+
+
 class OddsRefreshOut(BaseModel):
     written: int
     calls_used_this_month: int
