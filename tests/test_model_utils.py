@@ -8,9 +8,27 @@ from models.model_utils import (
     date_split,
     feature_columns,
     regression_metrics,
+    seasonal_walk_forward_splits,
     summarize_walk_forward,
     walk_forward_splits,
+    walk_forward_splits_by_games,
 )
+
+
+def _multi_season_df(games_per_day: int = 15, seasons: tuple[int, ...] = (2023, 2024, 2025, 2026)) -> pd.DataFrame:
+    """Synthetic data spanning multiple real MLB seasons with a realistic
+    Nov-Mar off-season gap between each (regular season modeled as
+    March 28 - September 30) - what exposes the calendar-based
+    walk_forward_splits' off-season bug and confirms the game-count-based
+    replacement and the seasonal splitter are both immune to it."""
+    rows = []
+    label = 0
+    for season in seasons:
+        for date in pd.date_range(f"{season}-03-28", f"{season}-09-30", freq="D"):
+            for _ in range(games_per_day):
+                rows.append({"date": date.date(), "label": label})  # unique per row, so leakage checks are meaningful
+                label += 1
+    return pd.DataFrame(rows)
 
 
 class TestDateSplit:
@@ -83,6 +101,109 @@ class TestWalkForwardSplits:
         for train_df, test_df in folds:
             assert not train_df.empty
             assert not test_df.empty
+
+
+class TestWalkForwardSplitsByGames:
+    def test_folds_never_empty_across_the_offseason_gap(self):
+        # The whole point: a calendar-day version (walk_forward_splits)
+        # would silently drop folds whose window lands in the Nov-Mar gap
+        # between seasons. Game-count folds are drawn from real rows, so
+        # there's no such thing as an empty one here.
+        df = _multi_season_df()
+        folds = walk_forward_splits_by_games(df, n_splits=5, test_size=150)
+        assert len(folds) == 5
+        for train_df, test_df in folds:
+            assert not train_df.empty
+            assert len(test_df) == 150
+
+    def test_test_block_never_spans_the_offseason_gap(self):
+        # A calendar window straddling the ~5-month off-season would show
+        # a huge gap between consecutive dates inside the block. Game-count
+        # blocks only ever contain real games, so the largest gap between
+        # consecutive dates in any block should look like normal in-season
+        # scheduling (at most a few days), nowhere near the real gap.
+        df = _multi_season_df()
+        folds = walk_forward_splits_by_games(df, n_splits=5, test_size=150)
+        for _, test_df in folds:
+            dates = sorted(pd.to_datetime(test_df["date"]).dt.date.unique())
+            gaps = [(b - a).days for a, b in zip(dates, dates[1:])]
+            assert max(gaps, default=0) < 30
+
+    def test_expanding_window_and_chronological_no_leakage(self):
+        df = _multi_season_df()
+        folds = walk_forward_splits_by_games(df, n_splits=5, test_size=150)
+        train_sizes = [len(train) for train, _ in folds]
+        assert train_sizes == sorted(train_sizes)
+        assert train_sizes[0] < train_sizes[-1]
+        for train_df, test_df in folds:
+            assert set(train_df["label"]).isdisjoint(set(test_df["label"]))
+            assert pd.to_datetime(train_df["date"]).max() < pd.to_datetime(test_df["date"]).min()
+
+    def test_last_fold_ends_at_the_newest_game(self):
+        df = _multi_season_df()
+        folds = walk_forward_splits_by_games(df, n_splits=5, test_size=150)
+        last_test = folds[-1][1]
+        assert pd.to_datetime(last_test["date"]).max().date() == df["date"].max()
+
+    def test_drops_folds_without_enough_training_history(self):
+        df = _multi_season_df(seasons=(2026,))  # one short season - not much history
+        folds = walk_forward_splits_by_games(df, n_splits=20, test_size=150, min_train_size=200)
+        assert len(folds) < 20
+        for train_df, _ in folds:
+            assert len(train_df) >= 200
+
+    def test_min_train_size_defaults_to_at_least_test_size(self):
+        # Only barely enough games for one fold's test block plus a
+        # trivial training set - default min_train_size (max(test_size,
+        # 200)) should reject it rather than fit a near-useless model.
+        df = _multi_season_df(seasons=(2026,), games_per_day=1)
+        n = len(df)
+        folds = walk_forward_splits_by_games(df, n_splits=1, test_size=n - 5)
+        assert folds == []
+
+    def test_stable_sort_preserves_same_day_row_order(self):
+        # Two dates, three rows each, with each date's rows deliberately
+        # NOT in label order - a stable sort-by-date must preserve each
+        # date group's pre-sort relative order rather than reordering ties
+        # some other way (e.g. falling back to sorting by label too).
+        df = pd.DataFrame(
+            {"date": [dt.date(2025, 4, 1)] * 3 + [dt.date(2025, 4, 2)] * 3, "label": [12, 10, 11, 22, 20, 21]}
+        )
+        folds = walk_forward_splits_by_games(df, n_splits=1, test_size=3, min_train_size=3)
+        train_df, test_df = folds[0]
+        assert list(train_df["label"]) == [12, 10, 11]
+        assert list(test_df["label"]) == [22, 20, 21]
+
+
+class TestSeasonalWalkForwardSplits:
+    def test_one_fold_per_season_after_the_first(self):
+        df = _multi_season_df(seasons=(2023, 2024, 2025, 2026))
+        folds = seasonal_walk_forward_splits(df)
+        assert len(folds) == 3  # 2024, 2025, 2026 each tested once - 2023 never tested
+
+    def test_folds_are_oldest_tested_season_first(self):
+        df = _multi_season_df(seasons=(2023, 2024, 2025, 2026))
+        folds = seasonal_walk_forward_splits(df)
+        test_years = [pd.to_datetime(test_df["date"]).dt.year.iloc[0] for _, test_df in folds]
+        assert test_years == [2024, 2025, 2026]
+
+    def test_trains_only_on_strictly_earlier_seasons(self):
+        df = _multi_season_df(seasons=(2023, 2024, 2025, 2026))
+        folds = seasonal_walk_forward_splits(df)
+        for train_df, test_df in folds:
+            test_year = pd.to_datetime(test_df["date"]).dt.year.iloc[0]
+            train_years = pd.to_datetime(train_df["date"]).dt.year.unique()
+            assert all(y < test_year for y in train_years)
+
+    def test_no_leakage_within_a_fold(self):
+        df = _multi_season_df(seasons=(2023, 2024, 2025, 2026))
+        folds = seasonal_walk_forward_splits(df)
+        for train_df, test_df in folds:
+            assert set(train_df["label"]).isdisjoint(set(test_df["label"]))
+
+    def test_no_folds_with_only_one_season(self):
+        df = _multi_season_df(seasons=(2026,))
+        assert seasonal_walk_forward_splits(df) == []
 
 
 class TestSummarizeWalkForward:

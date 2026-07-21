@@ -90,6 +90,93 @@ def walk_forward_splits(
     return folds
 
 
+def walk_forward_splits_by_games(
+    df: pd.DataFrame,
+    n_splits: int,
+    test_size: int,
+    date_col: str = "date",
+    min_train_size: int | None = None,
+) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
+    """Like walk_forward_splits above, but folds are laid out in GAMES, not
+    calendar days - immune to the off-season problem that makes the
+    calendar version misleading once `df` spans multiple MLB seasons.
+
+    The MLB regular season runs roughly late-March to early-October, so any
+    calendar-day test window that happens to land in the Nov-Mar off-season
+    contains zero games - walk_forward_splits silently drops that fold,
+    which can leave you with fewer real folds than n_splits (or, run in the
+    off-season, zero). A game-count window can't have this problem: there
+    are no off-season *games* to draw an empty block from in the first
+    place, since the block is built directly from real rows, not a date
+    range.
+
+    Sorts `df` chronologically first (a stable sort, so games sharing a
+    date keep their original relative order rather than being scrambled),
+    then lays out `n_splits` test blocks of `test_size` games each, walking
+    backward from the newest game so the last fold's test block ends at the
+    most recent data - same backward-then-reverse layout as
+    walk_forward_splits, just in row-count units. Each fold trains on every
+    game chronologically before its test block (expanding window, per
+    Section 11's leakage rule).
+
+    A fold is dropped only if its training block would have fewer than
+    `min_train_size` games (default: max(test_size, 200) - enough rows for
+    a model fit to mean something) - never because of a calendar
+    coincidence. Check `len(folds)` if the exact count matters.
+    """
+    if min_train_size is None:
+        min_train_size = max(test_size, 200)
+
+    sorted_df = df.sort_values(date_col, kind="stable").reset_index(drop=True)
+    n = len(sorted_df)
+
+    boundaries = []
+    test_end = n  # exclusive
+    for _ in range(n_splits):
+        test_start = test_end - test_size
+        boundaries.append((test_start, test_end))
+        test_end = test_start
+    boundaries.reverse()
+
+    folds = []
+    for test_start, test_end in boundaries:
+        if test_start < min_train_size:
+            continue  # not enough training history for this fold
+        train_df = sorted_df.iloc[:test_start].reset_index(drop=True)
+        test_df = sorted_df.iloc[test_start:test_end].reset_index(drop=True)
+        folds.append((train_df, test_df))
+    return folds
+
+
+def seasonal_walk_forward_splits(df: pd.DataFrame, date_col: str = "date") -> list[tuple[pd.DataFrame, pd.DataFrame]]:
+    """One (train_df, test_df) fold per season, oldest-tested-season-first:
+    trains on every strictly-earlier season's games (expanding window),
+    tests on one season's games. This is what actually answers "is the
+    model stable across seasons" - walk_forward_splits_by_games can't, since
+    its lookback (n_splits x test_size games) never reaches back past the
+    last few months of data even when `df` spans several years.
+
+    MLB seasons don't cross a calendar-year boundary (they run roughly
+    late-March to early-October), so grouping by calendar year is a safe,
+    simple proxy for "season" without needing a real schedule lookup. The
+    earliest season in `df` never appears as a test season (there's nothing
+    prior to train on) - it only ever contributes training rows to later
+    folds. A fold's tested season is recoverable from
+    `test_df[date_col]` for callers that want to label output by season
+    (see train_moneyline.py's seasonal reporting block).
+    """
+    years = pd.to_datetime(df[date_col]).dt.year
+    seasons = sorted(years.unique())
+
+    folds = []
+    for season in seasons[1:]:  # skip the earliest - no prior season to train on
+        train_df = df[years < season].reset_index(drop=True)
+        test_df = df[years == season].reset_index(drop=True)
+        if not train_df.empty and not test_df.empty:
+            folds.append((train_df, test_df))
+    return folds
+
+
 def feature_columns(df: pd.DataFrame) -> list[str]:
     return [c for c in df.columns if c not in NON_FEATURE_COLUMNS]
 

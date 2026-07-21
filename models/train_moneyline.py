@@ -40,8 +40,9 @@ from models.model_utils import (
     next_version,
     prepare_xy,
     save_model,
+    seasonal_walk_forward_splits,
     summarize_walk_forward,
-    walk_forward_splits,
+    walk_forward_splits_by_games,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -50,12 +51,16 @@ log = logging.getLogger(__name__)
 MODEL_NAME_BASELINE = "moneyline_logistic"
 MODEL_NAME_XGB = "moneyline_xgboost"
 
-# Walk-forward validation reporting (see model_utils.walk_forward_splits):
-# 5 folds of 2 weeks each - enough held-out windows to tell a real signal
-# from a lucky/unlucky single split, without needing more history than the
-# current backfill range reliably has.
+# Walk-forward validation reporting (see model_utils.walk_forward_splits_by_games):
+# 5 folds of 150 games each - counted in games, not calendar days, so a
+# fold is never silently dropped for landing in the Nov-Mar off-season the
+# way a calendar-day window could once the backfill spans multiple
+# seasons. 150 games is roughly the same order of magnitude as the old
+# 14-day calendar window's real game count (~15 games/day on a typical
+# in-season MLB slate), just measured in a way that's immune to off-days
+# and the off-season gap.
 WALK_FORWARD_N_SPLITS = 5
-WALK_FORWARD_TEST_WINDOW_DAYS = 14
+WALK_FORWARD_TEST_SIZE_GAMES = 150
 
 
 def train_baseline_logistic(X_train: pd.DataFrame, y_train: pd.Series) -> CalibratedClassifierCV:
@@ -113,17 +118,34 @@ def predict_win_probability(model, feature_row: pd.DataFrame) -> float:
 
 def _walk_forward_metrics(df: pd.DataFrame, train_fn) -> list[dict]:
     """Trains `train_fn(X_train, y_train) -> fitted model` on each
-    walk-forward fold (model_utils.walk_forward_splits) and scores it on
-    that fold's own held-out test window - a fresh model per fold, not the
-    single production model saved by run() below."""
+    walk-forward fold (model_utils.walk_forward_splits_by_games) and scores
+    it on that fold's own held-out test window - a fresh model per fold,
+    not the single production model saved by run() below."""
     fold_metrics = []
-    for train_fold, test_fold in walk_forward_splits(df, WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_WINDOW_DAYS):
+    for train_fold, test_fold in walk_forward_splits_by_games(df, WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_SIZE_GAMES):
         X_tr, y_tr, _ = prepare_xy(train_fold)
         X_te, y_te, _ = prepare_xy(test_fold)
         X_te = X_te.reindex(columns=X_tr.columns, fill_value=X_tr.median(numeric_only=True))
         model = train_fn(X_tr, y_tr)
         fold_metrics.append(classification_metrics(y_te, model.predict_proba(X_te)[:, 1]))
     return fold_metrics
+
+
+def _seasonal_metrics(df: pd.DataFrame, train_fn) -> list[tuple[int, dict]]:
+    """Same per-fold pattern as _walk_forward_metrics above, but one fold
+    per season (model_utils.seasonal_walk_forward_splits) - reports
+    metrics labeled by the season tested rather than averaged together, so
+    it's possible to eyeball whether performance holds steady across
+    seasons rather than just across the last few thousand games."""
+    results = []
+    for train_fold, test_fold in seasonal_walk_forward_splits(df):
+        season = int(pd.to_datetime(test_fold["date"]).dt.year.iloc[0])
+        X_tr, y_tr, _ = prepare_xy(train_fold)
+        X_te, y_te, _ = prepare_xy(test_fold)
+        X_te = X_te.reindex(columns=X_tr.columns, fill_value=X_tr.median(numeric_only=True))
+        model = train_fn(X_tr, y_tr)
+        results.append((season, classification_metrics(y_te, model.predict_proba(X_te)[:, 1])))
+    return results
 
 
 def run(train_start: dt.date, test_start: dt.date, test_end: dt.date) -> None:
@@ -163,14 +185,31 @@ def run(train_start: dt.date, test_start: dt.date, test_end: dt.date) -> None:
 
         # Walk-forward validation: the single split above is one train/test
         # boundary - could be a lucky or unlucky window. Retrain fresh
-        # per-fold models across several expanding-window folds and report
+        # per-fold models across several expanding-window folds (counted in
+        # games, not days - see WALK_FORWARD_TEST_SIZE_GAMES) and report
         # mean±std so it's clear whether the single-split number above is
-        # representative or noise (see model_utils.walk_forward_splits).
-        log.info("Running walk-forward validation (%d folds x %d days)...", WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_WINDOW_DAYS)
+        # representative or noise.
+        log.info("Running walk-forward validation (%d folds x %d games)...", WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_SIZE_GAMES)
         baseline_wf = summarize_walk_forward(_walk_forward_metrics(df, train_baseline_logistic))
         xgb_wf = summarize_walk_forward(_walk_forward_metrics(df, train_xgboost_calibrated))
         log.info("Baseline (logistic) - single split: %s | walk-forward: %s", baseline_metrics, baseline_wf or "not enough history for a walk-forward fold")
         log.info("XGBoost - single split: %s | walk-forward: %s", xgb_metrics, xgb_wf or "not enough history for a walk-forward fold")
+
+        # Seasonal validation: walk-forward above only ever looks back
+        # n_splits x test_size games, which never reaches past the last few
+        # months even with several backfilled seasons in `df`. One fold per
+        # season answers the actual question of interest once the backfill
+        # is widened: is 2024/2025 accuracy in the same ballpark as 2026's,
+        # or did the model only ever "work" on the most recent season?
+        log.info("Running seasonal walk-forward validation (one fold per season after the first)...")
+        baseline_seasonal = _seasonal_metrics(df, train_baseline_logistic)
+        xgb_seasonal = _seasonal_metrics(df, train_xgboost_calibrated)
+        if not baseline_seasonal:
+            log.info("Only one season in range - no seasonal comparison possible yet")
+        for season, metrics in baseline_seasonal:
+            log.info("Baseline (logistic) - season %d tested: %s", season, metrics)
+        for season, metrics in xgb_seasonal:
+            log.info("XGBoost - season %d tested: %s", season, metrics)
 
 
 if __name__ == "__main__":

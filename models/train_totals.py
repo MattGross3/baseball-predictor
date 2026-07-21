@@ -34,8 +34,9 @@ from models.model_utils import (
     next_version,
     regression_metrics,
     save_model,
+    seasonal_walk_forward_splits,
     summarize_walk_forward,
-    walk_forward_splits,
+    walk_forward_splits_by_games,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -45,10 +46,12 @@ MODEL_NAME_POISSON = "totals_poisson"
 MODEL_NAME_XGB = "totals_xgboost"
 MAX_TOTAL_RUNS = 30  # distribution support: 0..MAX_TOTAL_RUNS combined runs
 
-# Walk-forward validation reporting (see model_utils.walk_forward_splits and
-# train_moneyline.py's identical convention) - 5 folds of 2 weeks each.
+# Walk-forward validation reporting (see model_utils.walk_forward_splits_by_games
+# and train_moneyline.py's identical convention) - 5 folds of 150 games each,
+# counted in games rather than calendar days so a fold can't land in the
+# Nov-Mar off-season and come back empty.
 WALK_FORWARD_N_SPLITS = 5
-WALK_FORWARD_TEST_WINDOW_DAYS = 14
+WALK_FORWARD_TEST_SIZE_GAMES = 150
 
 
 def _prep(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, float]]:
@@ -170,17 +173,31 @@ def _xgb_fold_preds(xgb_bundle: dict, test_fold: pd.DataFrame):
 
 def _walk_forward_metrics(df: pd.DataFrame, train_fn, predict_fn) -> list[dict]:
     """Trains `train_fn(train_fold) -> bundle` on each walk-forward fold
-    (model_utils.walk_forward_splits) and scores it with `predict_fn(bundle,
-    test_fold) -> point predictions` on that fold's own held-out window -
-    a fresh model per fold, not the single production model saved by run()
-    below. Mirrors train_moneyline.py's identical-in-spirit helper, just
-    for regression (mean total runs) instead of classification."""
+    (model_utils.walk_forward_splits_by_games) and scores it with
+    `predict_fn(bundle, test_fold) -> point predictions` on that fold's own
+    held-out window - a fresh model per fold, not the single production
+    model saved by run() below. Mirrors train_moneyline.py's
+    identical-in-spirit helper, just for regression (mean total runs)
+    instead of classification."""
     fold_metrics = []
-    for train_fold, test_fold in walk_forward_splits(df, WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_WINDOW_DAYS):
+    for train_fold, test_fold in walk_forward_splits_by_games(df, WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_SIZE_GAMES):
         bundle = train_fn(train_fold)
         preds = predict_fn(bundle, test_fold)
         fold_metrics.append(regression_metrics(test_fold["label"], preds))
     return fold_metrics
+
+
+def _seasonal_metrics(df: pd.DataFrame, train_fn, predict_fn) -> list[tuple[int, dict]]:
+    """See train_moneyline._seasonal_metrics - identical pattern, one fold
+    per season (model_utils.seasonal_walk_forward_splits), labeled by the
+    season tested rather than averaged together."""
+    results = []
+    for train_fold, test_fold in seasonal_walk_forward_splits(df):
+        season = int(pd.to_datetime(test_fold["date"]).dt.year.iloc[0])
+        bundle = train_fn(train_fold)
+        preds = predict_fn(bundle, test_fold)
+        results.append((season, regression_metrics(test_fold["label"], preds)))
+    return results
 
 
 def run(train_start: dt.date, test_start: dt.date, test_end: dt.date) -> None:
@@ -218,11 +235,25 @@ def run(train_start: dt.date, test_start: dt.date, test_end: dt.date) -> None:
         # Walk-forward validation - see train_moneyline.py's identical block
         # for why this matters: one single-split number could be a lucky or
         # unlucky test window.
-        log.info("Running walk-forward validation (%d folds x %d days)...", WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_WINDOW_DAYS)
+        log.info("Running walk-forward validation (%d folds x %d games)...", WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_SIZE_GAMES)
         poisson_wf = summarize_walk_forward(_walk_forward_metrics(df, train_poisson_baseline, _poisson_fold_preds))
         xgb_wf = summarize_walk_forward(_walk_forward_metrics(df, train_xgb_totals, _xgb_fold_preds))
         log.info("Poisson baseline - single split: %s | walk-forward: %s", poisson_metrics, poisson_wf or "not enough history for a walk-forward fold")
         log.info("XGBoost totals - single split: %s | walk-forward: %s", xgb_metrics, xgb_wf or "not enough history for a walk-forward fold")
+
+        # Seasonal validation - see train_moneyline.py's identical block:
+        # answers whether accuracy holds steady across seasons, which the
+        # walk-forward block above can't (its lookback never reaches past
+        # the last few months of games).
+        log.info("Running seasonal walk-forward validation (one fold per season after the first)...")
+        poisson_seasonal = _seasonal_metrics(df, train_poisson_baseline, _poisson_fold_preds)
+        xgb_seasonal = _seasonal_metrics(df, train_xgb_totals, _xgb_fold_preds)
+        if not poisson_seasonal:
+            log.info("Only one season in range - no seasonal comparison possible yet")
+        for season, metrics in poisson_seasonal:
+            log.info("Poisson baseline - season %d tested: %s", season, metrics)
+        for season, metrics in xgb_seasonal:
+            log.info("XGBoost totals - season %d tested: %s", season, metrics)
 
 
 if __name__ == "__main__":

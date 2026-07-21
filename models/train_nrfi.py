@@ -41,8 +41,9 @@ from models.model_utils import (
     next_version,
     prepare_xy,
     save_model,
+    seasonal_walk_forward_splits,
     summarize_walk_forward,
-    walk_forward_splits,
+    walk_forward_splits_by_games,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -52,10 +53,12 @@ MODEL_NAME_LOGISTIC = "nrfi_logistic"
 MODEL_NAME_XGB = "nrfi_xgboost"
 MEANINGFUL_LIFT_LOGLOSS = 0.01  # XGBoost must beat logistic by at least this much log-loss to be worth the complexity
 
-# Walk-forward validation reporting (see model_utils.walk_forward_splits and
-# train_moneyline.py's identical convention) - 5 folds of 2 weeks each.
+# Walk-forward validation reporting (see model_utils.walk_forward_splits_by_games
+# and train_moneyline.py's identical convention) - 5 folds of 150 games each,
+# counted in games rather than calendar days so a fold can't land in the
+# Nov-Mar off-season and come back empty.
 WALK_FORWARD_N_SPLITS = 5
-WALK_FORWARD_TEST_WINDOW_DAYS = 14
+WALK_FORWARD_TEST_SIZE_GAMES = 150
 
 
 def train_logistic(X_train: pd.DataFrame, y_train: pd.Series) -> CalibratedClassifierCV:
@@ -108,13 +111,28 @@ def _walk_forward_metrics(df: pd.DataFrame, train_fn) -> list[dict]:
     fresh model per walk-forward fold, scored on that fold's own held-out
     window."""
     fold_metrics = []
-    for train_fold, test_fold in walk_forward_splits(df, WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_WINDOW_DAYS):
+    for train_fold, test_fold in walk_forward_splits_by_games(df, WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_SIZE_GAMES):
         X_tr, y_tr, _ = prepare_xy(train_fold)
         X_te, y_te, _ = prepare_xy(test_fold)
         X_te = X_te.reindex(columns=X_tr.columns, fill_value=X_tr.median(numeric_only=True))
         model = train_fn(X_tr, y_tr)
         fold_metrics.append(classification_metrics(y_te, model.predict_proba(X_te)[:, 1]))
     return fold_metrics
+
+
+def _seasonal_metrics(df: pd.DataFrame, train_fn) -> list[tuple[int, dict]]:
+    """See train_moneyline._seasonal_metrics - identical pattern, one fold
+    per season (model_utils.seasonal_walk_forward_splits), labeled by the
+    season tested rather than averaged together."""
+    results = []
+    for train_fold, test_fold in seasonal_walk_forward_splits(df):
+        season = int(pd.to_datetime(test_fold["date"]).dt.year.iloc[0])
+        X_tr, y_tr, _ = prepare_xy(train_fold)
+        X_te, y_te, _ = prepare_xy(test_fold)
+        X_te = X_te.reindex(columns=X_tr.columns, fill_value=X_tr.median(numeric_only=True))
+        model = train_fn(X_tr, y_tr)
+        results.append((season, classification_metrics(y_te, model.predict_proba(X_te)[:, 1])))
+    return results
 
 
 def run(train_start: dt.date, test_start: dt.date, test_end: dt.date) -> None:
@@ -157,11 +175,25 @@ def run(train_start: dt.date, test_start: dt.date, test_end: dt.date) -> None:
         # Walk-forward validation - see train_moneyline.py's identical block
         # for why this matters: one single-split number could be a lucky or
         # unlucky test window.
-        log.info("Running walk-forward validation (%d folds x %d days)...", WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_WINDOW_DAYS)
+        log.info("Running walk-forward validation (%d folds x %d games)...", WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_SIZE_GAMES)
         logistic_wf = summarize_walk_forward(_walk_forward_metrics(df, train_logistic))
         xgb_wf = summarize_walk_forward(_walk_forward_metrics(df, train_xgboost))
         log.info("Logistic - single split: %s | walk-forward: %s", logistic_metrics, logistic_wf or "not enough history for a walk-forward fold")
         log.info("XGBoost - single split: %s | walk-forward: %s", xgb_metrics, xgb_wf or "not enough history for a walk-forward fold")
+
+        # Seasonal validation - see train_moneyline.py's identical block:
+        # answers whether accuracy holds steady across seasons, which the
+        # walk-forward block above can't (its lookback never reaches past
+        # the last few months of games).
+        log.info("Running seasonal walk-forward validation (one fold per season after the first)...")
+        logistic_seasonal = _seasonal_metrics(df, train_logistic)
+        xgb_seasonal = _seasonal_metrics(df, train_xgboost)
+        if not logistic_seasonal:
+            log.info("Only one season in range - no seasonal comparison possible yet")
+        for season, metrics in logistic_seasonal:
+            log.info("Logistic - season %d tested: %s", season, metrics)
+        for season, metrics in xgb_seasonal:
+            log.info("XGBoost - season %d tested: %s", season, metrics)
 
 
 if __name__ == "__main__":
