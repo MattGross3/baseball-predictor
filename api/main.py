@@ -56,11 +56,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(games.router)
-app.include_router(predictions.router)
-app.include_router(backtest.router)
-app.include_router(models.router)
-app.include_router(odds.router)
+for router in (games.router, predictions.router, backtest.router, models.router, odds.router):
+    app.include_router(router)
 
 
 @app.get("/health")

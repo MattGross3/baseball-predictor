@@ -8,7 +8,7 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from api.schemas import GameFeaturesOut, GameOut, GamePredictionsOut, GameSlateSummaryOut, OddsOut, PredictionOut
+from api.schemas import GameFeaturesOut, GameOut, GamePredictionsOut, GameSlateSummaryOut, GameSyncOut, OddsOut, PredictionOut
 from backtest.clv_tracker import american_to_implied_prob, devig_two_way
 from database.db import get_db
 from database.models import Game, GameFeatureCache, OddsSnapshot, Player, Prediction
@@ -25,6 +25,39 @@ def games_today(date: dt.date | None = None, db: Session = Depends(get_db)):
     target_date = date or dt.date.today()
     games = db.execute(select(Game).where(Game.date == target_date).order_by(Game.start_time)).scalars().all()
     return games
+
+
+@router.post("/sync", response_model=GameSyncOut)
+def sync_games(days_ahead: int = 3):
+    """On-demand schedule pull (Section 10's job_morning_schedule), for
+    whenever a user doesn't want to wait for the scheduler process - the
+    common case in a dev environment where scheduler/daily_jobs.py isn't
+    running continuously, which is exactly why a newly-scheduled day's
+    games (e.g. tomorrow's slate) can be invisible until this runs.
+
+    Reuses scripts.backfill_data.backfill_date per day (today through
+    today + days_ahead) - it always re-pulls the schedule first (an
+    idempotent upsert, safe to call repeatedly) and, for any games that
+    have since gone final, also backfills box scores/lineups/linescores/
+    umpires in the same pass - so one click both brings in newly-scheduled
+    games and catches up on recently-finished ones. Each day manages its
+    own DB session internally (see backfill_date), so this doesn't need
+    the shared request-scoped session.
+    """
+    from scripts.backfill_data import backfill_date
+
+    today = dt.date.today()
+    total_games = 0
+    for offset in range(days_ahead + 1):
+        stats = backfill_date(today + dt.timedelta(days=offset))
+        total_games += stats["games"]
+
+    end_date = today + dt.timedelta(days=days_ahead)
+    return GameSyncOut(
+        days_synced=days_ahead + 1,
+        games_seen=total_games,
+        message=f"Synced {today} through {end_date} - {total_games} game{'s' if total_games != 1 else ''} seen.",
+    )
 
 
 @router.get("/{game_id}", response_model=GameOut)

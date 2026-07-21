@@ -15,6 +15,9 @@ export function TodaySlate() {
   const [refreshing, setRefreshing] = useState(false)
   const [refreshMessage, setRefreshMessage] = useState<string | null>(null)
 
+  const [syncing, setSyncing] = useState(false)
+  const [syncMessage, setSyncMessage] = useState<string | null>(null)
+
   useEffect(() => {
     let cancelled = false
     setLoading(true)
@@ -62,6 +65,30 @@ export function TodaySlate() {
       .finally(() => setRefreshing(false))
   }
 
+  function syncGames() {
+    setSyncing(true)
+    setSyncMessage(null)
+
+    api
+      .syncGames()
+      .then((result) => {
+        setSyncMessage(result.message)
+        // New games may now exist for the currently-viewed date (e.g. a
+        // future day whose schedule just got pulled in for the first
+        // time) - re-fetch rather than requiring a manual date-picker
+        // nudge to see them appear.
+        return Promise.all([api.gamesToday(date), api.getGameSlateSummary(date)])
+      })
+      .then(([fetchedGames, fetchedSummaries]) => {
+        setGames(fetchedGames)
+        setSummaries(Object.fromEntries(fetchedSummaries.map((summary) => [summary.game_id, summary])))
+      })
+      .catch((err: unknown) => {
+        setSyncMessage(err instanceof ApiError ? `API error (${err.status}): ${err.message}` : 'Could not reach the API.')
+      })
+      .finally(() => setSyncing(false))
+  }
+
   return (
     <div>
       <div className="flex items-start justify-between mb-6 flex-wrap gap-3">
@@ -73,6 +100,13 @@ export function TodaySlate() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            onClick={syncGames}
+            disabled={syncing}
+            className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface-card)] px-3 py-2 text-sm font-medium hover:border-[color:var(--color-ink-muted)] transition-colors disabled:opacity-50"
+          >
+            {syncing ? 'Syncing games…' : 'Sync games'}
+          </button>
           <button
             onClick={refreshOdds}
             disabled={refreshing}
@@ -89,8 +123,11 @@ export function TodaySlate() {
         </div>
       </div>
 
-      {refreshMessage && (
-        <p className="text-xs text-[color:var(--color-ink-muted)] -mt-4 mb-6">{refreshMessage}</p>
+      {(syncMessage || refreshMessage) && (
+        <div className="-mt-4 mb-6 space-y-1">
+          {syncMessage && <p className="text-xs text-[color:var(--color-ink-muted)]">{syncMessage}</p>}
+          {refreshMessage && <p className="text-xs text-[color:var(--color-ink-muted)]">{refreshMessage}</p>}
+        </div>
       )}
 
       {loading && <LoadingState label="Loading today's slate…" />}

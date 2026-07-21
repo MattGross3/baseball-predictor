@@ -35,7 +35,15 @@ from xgboost import XGBClassifier
 
 from database.db import session_scope
 from features.build_feature_matrix import build_training_matrix
-from models.model_utils import classification_metrics, date_split, next_version, prepare_xy, save_model
+from models.model_utils import (
+    classification_metrics,
+    date_split,
+    next_version,
+    prepare_xy,
+    save_model,
+    summarize_walk_forward,
+    walk_forward_splits,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -43,6 +51,11 @@ log = logging.getLogger(__name__)
 MODEL_NAME_LOGISTIC = "nrfi_logistic"
 MODEL_NAME_XGB = "nrfi_xgboost"
 MEANINGFUL_LIFT_LOGLOSS = 0.01  # XGBoost must beat logistic by at least this much log-loss to be worth the complexity
+
+# Walk-forward validation reporting (see model_utils.walk_forward_splits and
+# train_moneyline.py's identical convention) - 5 folds of 2 weeks each.
+WALK_FORWARD_N_SPLITS = 5
+WALK_FORWARD_TEST_WINDOW_DAYS = 14
 
 
 def train_logistic(X_train: pd.DataFrame, y_train: pd.Series) -> CalibratedClassifierCV:
@@ -90,6 +103,20 @@ def predict_nrfi_probability(model, feature_row: pd.DataFrame) -> float:
     return float(model.predict_proba(feature_row)[:, 1][0])
 
 
+def _walk_forward_metrics(df: pd.DataFrame, train_fn) -> list[dict]:
+    """See train_moneyline._walk_forward_metrics - identical pattern, a
+    fresh model per walk-forward fold, scored on that fold's own held-out
+    window."""
+    fold_metrics = []
+    for train_fold, test_fold in walk_forward_splits(df, WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_WINDOW_DAYS):
+        X_tr, y_tr, _ = prepare_xy(train_fold)
+        X_te, y_te, _ = prepare_xy(test_fold)
+        X_te = X_te.reindex(columns=X_tr.columns, fill_value=X_tr.median(numeric_only=True))
+        model = train_fn(X_tr, y_tr)
+        fold_metrics.append(classification_metrics(y_te, model.predict_proba(X_te)[:, 1]))
+    return fold_metrics
+
+
 def run(train_start: dt.date, test_start: dt.date, test_end: dt.date) -> None:
     with session_scope() as db:
         log.info("Building training matrix %s -> %s (nrfi)", train_start, test_end)
@@ -104,8 +131,8 @@ def run(train_start: dt.date, test_start: dt.date, test_end: dt.date) -> None:
             return
         log.info("Train rows: %d (NRFI rate %.1f%%), Test rows: %d", len(train_df), 100 * train_df["label"].mean(), len(test_df))
 
-        X_train, y_train = prepare_xy(train_df)
-        X_test, y_test = prepare_xy(test_df)
+        X_train, y_train, train_medians = prepare_xy(train_df)
+        X_test, y_test, _ = prepare_xy(test_df)
         X_test = X_test.reindex(columns=X_train.columns, fill_value=X_train.median(numeric_only=True))
         cols = list(X_train.columns)
 
@@ -113,19 +140,28 @@ def run(train_start: dt.date, test_start: dt.date, test_end: dt.date) -> None:
         logistic = train_logistic(X_train, y_train)
         logistic_metrics = classification_metrics(y_test, logistic.predict_proba(X_test)[:, 1])
         log.info("Logistic test metrics: %s", logistic_metrics)
-        save_model(db, logistic, MODEL_NAME_LOGISTIC, "nrfi", next_version(db, MODEL_NAME_LOGISTIC), logistic_metrics, cols)
+        save_model(db, logistic, MODEL_NAME_LOGISTIC, "nrfi", next_version(db, MODEL_NAME_LOGISTIC), logistic_metrics, cols, feature_medians=train_medians)
 
         log.info("Training XGBoost for comparison...")
         xgb = train_xgboost(X_train, y_train)
         xgb_metrics = classification_metrics(y_test, xgb.predict_proba(X_test)[:, 1])
         log.info("XGBoost test metrics: %s", xgb_metrics)
-        save_model(db, xgb, MODEL_NAME_XGB, "nrfi", next_version(db, MODEL_NAME_XGB), xgb_metrics, cols)
+        save_model(db, xgb, MODEL_NAME_XGB, "nrfi", next_version(db, MODEL_NAME_XGB), xgb_metrics, cols, feature_medians=train_medians)
 
         lift = logistic_metrics["log_loss"] - xgb_metrics["log_loss"]
         if lift > MEANINGFUL_LIFT_LOGLOSS:
             log.info("XGBoost beats logistic by %.4f log-loss (> %.2f threshold) - real lift, worth the extra complexity", lift, MEANINGFUL_LIFT_LOGLOSS)
         else:
             log.info("XGBoost does not meaningfully beat logistic (delta %.4f) - stick with the logistic baseline per the spec's own rule", lift)
+
+        # Walk-forward validation - see train_moneyline.py's identical block
+        # for why this matters: one single-split number could be a lucky or
+        # unlucky test window.
+        log.info("Running walk-forward validation (%d folds x %d days)...", WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_WINDOW_DAYS)
+        logistic_wf = summarize_walk_forward(_walk_forward_metrics(df, train_logistic))
+        xgb_wf = summarize_walk_forward(_walk_forward_metrics(df, train_xgboost))
+        log.info("Logistic - single split: %s | walk-forward: %s", logistic_metrics, logistic_wf or "not enough history for a walk-forward fold")
+        log.info("XGBoost - single split: %s | walk-forward: %s", xgb_metrics, xgb_wf or "not enough history for a walk-forward fold")
 
 
 if __name__ == "__main__":

@@ -164,6 +164,12 @@ class OddsRefreshOut(BaseModel):
     message: str
 
 
+class GameSyncOut(BaseModel):
+    days_synced: int
+    games_seen: int
+    message: str
+
+
 class ModelInfoOut(BaseModel):
     model_name: str
     target_type: str

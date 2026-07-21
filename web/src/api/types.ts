@@ -211,6 +211,12 @@ export interface OddsRefreshResult {
   message: string
 }
 
+export interface GameSyncResult {
+  days_synced: number
+  games_seen: number
+  message: string
+}
+
 export interface SpreadResult {
   date_range: string
   roi_flat_bet: number | null

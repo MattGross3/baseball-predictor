@@ -33,13 +33,29 @@ from xgboost import XGBClassifier
 
 from database.db import session_scope
 from features.build_feature_matrix import build_training_matrix
-from models.model_utils import classification_metrics, date_split, feature_columns, next_version, prepare_xy, save_model
+from models.model_utils import (
+    classification_metrics,
+    date_split,
+    feature_columns,
+    next_version,
+    prepare_xy,
+    save_model,
+    summarize_walk_forward,
+    walk_forward_splits,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 MODEL_NAME_BASELINE = "moneyline_logistic"
 MODEL_NAME_XGB = "moneyline_xgboost"
+
+# Walk-forward validation reporting (see model_utils.walk_forward_splits):
+# 5 folds of 2 weeks each - enough held-out windows to tell a real signal
+# from a lucky/unlucky single split, without needing more history than the
+# current backfill range reliably has.
+WALK_FORWARD_N_SPLITS = 5
+WALK_FORWARD_TEST_WINDOW_DAYS = 14
 
 
 def train_baseline_logistic(X_train: pd.DataFrame, y_train: pd.Series) -> CalibratedClassifierCV:
@@ -95,6 +111,21 @@ def predict_win_probability(model, feature_row: pd.DataFrame) -> float:
     return float(model.predict_proba(feature_row)[:, 1][0])
 
 
+def _walk_forward_metrics(df: pd.DataFrame, train_fn) -> list[dict]:
+    """Trains `train_fn(X_train, y_train) -> fitted model` on each
+    walk-forward fold (model_utils.walk_forward_splits) and scores it on
+    that fold's own held-out test window - a fresh model per fold, not the
+    single production model saved by run() below."""
+    fold_metrics = []
+    for train_fold, test_fold in walk_forward_splits(df, WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_WINDOW_DAYS):
+        X_tr, y_tr, _ = prepare_xy(train_fold)
+        X_te, y_te, _ = prepare_xy(test_fold)
+        X_te = X_te.reindex(columns=X_tr.columns, fill_value=X_tr.median(numeric_only=True))
+        model = train_fn(X_tr, y_tr)
+        fold_metrics.append(classification_metrics(y_te, model.predict_proba(X_te)[:, 1]))
+    return fold_metrics
+
+
 def run(train_start: dt.date, test_start: dt.date, test_end: dt.date) -> None:
     with session_scope() as db:
         log.info("Building training matrix %s -> %s (moneyline)", train_start, test_end)
@@ -110,8 +141,8 @@ def run(train_start: dt.date, test_start: dt.date, test_end: dt.date) -> None:
             log.error("Train or test split is empty - widen the date range")
             return
 
-        X_train, y_train = prepare_xy(train_df)
-        X_test, y_test = prepare_xy(test_df)
+        X_train, y_train, train_medians = prepare_xy(train_df)
+        X_test, y_test, _ = prepare_xy(test_df)
         X_test = X_test.reindex(columns=X_train.columns, fill_value=X_train.median(numeric_only=True))
         cols = list(X_train.columns)
 
@@ -119,16 +150,27 @@ def run(train_start: dt.date, test_start: dt.date, test_end: dt.date) -> None:
         baseline = train_baseline_logistic(X_train, y_train)
         baseline_metrics = classification_metrics(y_test, baseline.predict_proba(X_test)[:, 1])
         log.info("Baseline (logistic) test metrics: %s", baseline_metrics)
-        save_model(db, baseline, MODEL_NAME_BASELINE, "moneyline", next_version(db, MODEL_NAME_BASELINE), baseline_metrics, cols)
+        save_model(db, baseline, MODEL_NAME_BASELINE, "moneyline", next_version(db, MODEL_NAME_BASELINE), baseline_metrics, cols, feature_medians=train_medians)
 
         log.info("Training XGBoost (calibrated)...")
         xgb_model = train_xgboost_calibrated(X_train, y_train)
         xgb_metrics = classification_metrics(y_test, xgb_model.predict_proba(X_test)[:, 1])
         log.info("XGBoost test metrics: %s", xgb_metrics)
-        save_model(db, xgb_model, MODEL_NAME_XGB, "moneyline", next_version(db, MODEL_NAME_XGB), xgb_metrics, cols)
+        save_model(db, xgb_model, MODEL_NAME_XGB, "moneyline", next_version(db, MODEL_NAME_XGB), xgb_metrics, cols, feature_medians=train_medians)
 
         winner = MODEL_NAME_XGB if xgb_metrics["log_loss"] < baseline_metrics["log_loss"] else MODEL_NAME_BASELINE
         log.info("Lower log-loss on held-out test set: %s", winner)
+
+        # Walk-forward validation: the single split above is one train/test
+        # boundary - could be a lucky or unlucky window. Retrain fresh
+        # per-fold models across several expanding-window folds and report
+        # mean±std so it's clear whether the single-split number above is
+        # representative or noise (see model_utils.walk_forward_splits).
+        log.info("Running walk-forward validation (%d folds x %d days)...", WALK_FORWARD_N_SPLITS, WALK_FORWARD_TEST_WINDOW_DAYS)
+        baseline_wf = summarize_walk_forward(_walk_forward_metrics(df, train_baseline_logistic))
+        xgb_wf = summarize_walk_forward(_walk_forward_metrics(df, train_xgboost_calibrated))
+        log.info("Baseline (logistic) - single split: %s | walk-forward: %s", baseline_metrics, baseline_wf or "not enough history for a walk-forward fold")
+        log.info("XGBoost - single split: %s | walk-forward: %s", xgb_metrics, xgb_wf or "not enough history for a walk-forward fold")
 
 
 if __name__ == "__main__":

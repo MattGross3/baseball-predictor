@@ -3,7 +3,14 @@ import datetime as dt
 import pandas as pd
 
 from api.schemas import PredictionOut
-from models.model_utils import classification_metrics, date_split, feature_columns, regression_metrics
+from models.model_utils import (
+    classification_metrics,
+    date_split,
+    feature_columns,
+    regression_metrics,
+    summarize_walk_forward,
+    walk_forward_splits,
+)
 
 
 class TestDateSplit:
@@ -28,6 +35,80 @@ class TestDateSplit:
         assert set(train["label"]).isdisjoint(set(test["label"]))
         assert len(train) + len(test) == len(df)
         assert (pd.to_datetime(train["date"]).dt.date < dt.date(2025, 4, 6)).all()
+
+
+class TestWalkForwardSplits:
+    def _df(self, n_days=40):
+        return pd.DataFrame({"date": pd.date_range("2025-04-01", periods=n_days), "label": range(n_days)})
+
+    def test_returns_requested_number_of_folds_when_data_allows(self):
+        df = self._df(n_days=40)
+        folds = walk_forward_splits(df, n_splits=3, test_window_days=10)
+        assert len(folds) == 3
+
+    def test_folds_are_chronological_and_expanding(self):
+        df = self._df(n_days=40)
+        folds = walk_forward_splits(df, n_splits=3, test_window_days=10)
+        # Expanding window: each successive fold's train set is a superset
+        # of (strictly larger than) the previous fold's, since the cutoff
+        # only ever advances forward in time.
+        train_sizes = [len(train) for train, _ in folds]
+        assert train_sizes == sorted(train_sizes)
+        assert train_sizes[0] < train_sizes[-1]
+
+        # Chronological order: fold i's test window ends before fold i+1's.
+        test_max_dates = [pd.to_datetime(test["date"]).max() for _, test in folds]
+        assert test_max_dates == sorted(test_max_dates)
+
+    def test_no_row_leaks_between_train_and_test_within_a_fold(self):
+        df = self._df(n_days=40)
+        folds = walk_forward_splits(df, n_splits=3, test_window_days=10)
+        for train_df, test_df in folds:
+            assert set(train_df["label"]).isdisjoint(set(test_df["label"]))
+            assert (pd.to_datetime(train_df["date"]).dt.date < pd.to_datetime(test_df["date"]).dt.date.min()).all()
+
+    def test_last_fold_test_window_ends_at_most_recent_data(self):
+        df = self._df(n_days=40)
+        folds = walk_forward_splits(df, n_splits=3, test_window_days=10)
+        last_test = folds[-1][1]
+        assert pd.to_datetime(last_test["date"]).max().date() == df["date"].max().date()
+
+    def test_drops_folds_that_would_have_no_training_history(self):
+        # Only 15 days of data but asking for 3 folds of 10-day test
+        # windows (30 days) - most folds have nowhere to draw a non-empty
+        # training set from and should be silently dropped, not raise.
+        df = self._df(n_days=15)
+        folds = walk_forward_splits(df, n_splits=3, test_window_days=10)
+        assert len(folds) < 3
+        for train_df, test_df in folds:
+            assert not train_df.empty
+            assert not test_df.empty
+
+
+class TestSummarizeWalkForward:
+    def test_empty_folds_returns_empty_dict(self):
+        assert summarize_walk_forward([]) == {}
+
+    def test_averages_and_sums_across_folds(self):
+        folds = [
+            {"accuracy": 0.5, "log_loss": 0.70, "brier_score": 0.25, "n": 10},
+            {"accuracy": 0.6, "log_loss": 0.68, "brier_score": 0.24, "n": 20},
+        ]
+        summary = summarize_walk_forward(folds)
+        assert summary["n_folds"] == 2
+        assert summary["n_total"] == 30  # summed, not averaged
+        assert summary["accuracy_mean"] == 0.55
+        assert summary["log_loss_mean"] == 0.69
+
+    def test_identical_folds_have_zero_std(self):
+        folds = [{"accuracy": 0.5, "n": 10}, {"accuracy": 0.5, "n": 10}]
+        summary = summarize_walk_forward(folds)
+        assert summary["accuracy_std"] == 0.0
+
+    def test_varying_folds_have_nonzero_std(self):
+        folds = [{"accuracy": 0.4, "n": 10}, {"accuracy": 0.6, "n": 10}]
+        summary = summarize_walk_forward(folds)
+        assert summary["accuracy_std"] > 0
 
 
 class TestFeatureColumns:

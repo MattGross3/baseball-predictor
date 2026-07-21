@@ -73,11 +73,19 @@ def _score_with_model(entry: ModelRegistryEntry, target: str, nested: dict) -> t
     share one (expensive) feature build - see generate_all_model_predictions."""
     bundle = load_model(entry.file_path)
     model, feature_cols = bundle["model"], bundle["feature_columns"]
+    medians = bundle.get("feature_medians", {})
 
     flat = flatten_feature_row(nested)
-    X = pd.DataFrame([flat]).reindex(columns=feature_cols, fill_value=0)
+    X = pd.DataFrame([flat]).reindex(columns=feature_cols)
     # See train_totals._prep for why the explicit float cast matters here.
-    X = X.apply(pd.to_numeric, errors="coerce").fillna(0).astype(float)
+    # Missing values are filled with this model's training-set median
+    # (persisted by model_utils.save_model), not 0 - 0 reads to the model
+    # as "elite" for stats like ERA/win_pct, not "unknown", which distorts
+    # exactly the thin-data cases (rookies, call-ups, an ingestion hiccup)
+    # where a neutral fill matters most. Falls back to 0 only for legacy
+    # model bundles saved before feature_medians was persisted.
+    X = X.apply(pd.to_numeric, errors="coerce")
+    X = X.fillna(pd.Series(medians)).fillna(0).astype(float)
 
     if target in ("moneyline", "nrfi"):
         return None, float(model.predict_proba(X)[:, 1][0]), None, None
