@@ -224,6 +224,11 @@ export interface PredictGenerateResult {
   message: string
 }
 
+export interface HealthConfig {
+  odds_api_key_configured: boolean
+  weather_api_key_configured: boolean
+}
+
 export interface SpreadResult {
   date_range: string
   roi_flat_bet: number | null

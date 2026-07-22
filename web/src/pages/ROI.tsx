@@ -70,7 +70,7 @@ export function ROI() {
       api.spreadResults(dateRange).catch(() => null as SpreadResult | null),
       api.backtestResults('nrfi_logistic', dateRange).catch(() => null as BacktestResult | null),
     ])
-      .then(([moneyline, total, spread, nrfi]) => {
+      .then(([moneyline, , spread, nrfi]) => {
         if (cancelled) return
         setCards([
           {

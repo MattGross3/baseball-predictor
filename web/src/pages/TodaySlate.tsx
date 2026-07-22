@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError } from '../api/client'
-import type { Game, GameSlateSummary } from '../api/types'
+import type { Game, GameSlateSummary, HealthConfig } from '../api/types'
 import { GameRow } from '../components/GameRow'
 import { localIsoDate } from '../lib/date'
 import { EmptyState, ErrorState, LoadingState } from '../components/States'
+
+const ODDS_BANNER_DISMISSED_KEY = 'oddsKeyBannerDismissed'
 
 export function TodaySlate() {
   const [date, setDate] = useState(() => localIsoDate(new Date()))
@@ -11,6 +13,9 @@ export function TodaySlate() {
   const [summaries, setSummaries] = useState<Record<number, GameSlateSummary>>({})
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+
+  const [healthConfig, setHealthConfig] = useState<HealthConfig | null>(null)
+  const [bannerDismissed, setBannerDismissed] = useState(() => localStorage.getItem(ODDS_BANNER_DISMISSED_KEY) === 'true')
 
   const [refreshing, setRefreshing] = useState(false)
   const [refreshMessage, setRefreshMessage] = useState<string | null>(null)
@@ -45,6 +50,17 @@ export function TodaySlate() {
       cancelled = true
     }
   }, [date])
+
+  useEffect(() => {
+    // Only fetches once - which optional API keys are configured doesn't
+    // change while the page is open, unlike the date-scoped game data above.
+    api.healthConfig().then(setHealthConfig).catch(() => setHealthConfig(null))
+  }, [])
+
+  function dismissOddsBanner() {
+    localStorage.setItem(ODDS_BANNER_DISMISSED_KEY, 'true')
+    setBannerDismissed(true)
+  }
 
   function refreshOdds() {
     setRefreshing(true)
@@ -120,6 +136,9 @@ export function TodaySlate() {
           <p className="text-sm text-[color:var(--color-ink-muted)] mt-1">
             Expected win probability and predicted run total for each game.
           </p>
+          <p className="text-xs text-[color:var(--color-ink-faint)] mt-1">
+            NRFI calls only show at 60%+ confidence either way - the model validates at roughly a coin flip below that.
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <button
@@ -152,6 +171,22 @@ export function TodaySlate() {
         </div>
       </div>
 
+      {healthConfig && !healthConfig.odds_api_key_configured && !bannerDismissed && (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-[color:var(--color-warning)] bg-[color:var(--color-warning-soft)] px-4 py-3 mb-6 text-sm">
+          <p className="text-[color:var(--color-ink)]">
+            No <code className="text-xs">ODDS_API_KEY</code> is configured, so odds columns (moneyline price, run line, total
+            line, O/U prices, edge vs. market) are blank on every game below by design, not because something's broken - see
+            the README's "API keys" section to add one.
+          </p>
+          <button
+            onClick={dismissOddsBanner}
+            className="text-[color:var(--color-ink-muted)] hover:text-[color:var(--color-ink)] text-xs font-medium shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {(predictMessage || syncMessage || refreshMessage) && (
         <div className="-mt-4 mb-6 space-y-1">
           {predictMessage && <p className="text-xs text-[color:var(--color-ink-muted)]">{predictMessage}</p>}
@@ -168,7 +203,12 @@ export function TodaySlate() {
       {!loading && !error && games && games.length > 0 && (
         <div className="flex flex-col gap-3">
           {games.map((game) => (
-            <GameRow key={game.id} game={game} summary={summaries[game.id]} />
+            <GameRow
+              key={game.id}
+              game={game}
+              summary={summaries[game.id]}
+              oddsKeyConfigured={healthConfig?.odds_api_key_configured ?? true}
+            />
           ))}
         </div>
       )}

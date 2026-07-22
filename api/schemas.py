@@ -157,6 +157,16 @@ class SpreadResultOut(BaseModel):
     computed_at: dt.datetime | None = None
 
 
+class HealthConfigOut(BaseModel):
+    """Which optional API keys are configured - booleans only, never the
+    key values. Lets the frontend distinguish "no key configured, blank by
+    design" from "key configured but this row just has no data yet" for
+    odds-derived fields, rather than showing an unexplained '—' either way."""
+
+    odds_api_key_configured: bool
+    weather_api_key_configured: bool
+
+
 class OddsRefreshOut(BaseModel):
     written: int
     calls_used_this_month: int

@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import backtest, games, models, odds, predictions
+from api.schemas import HealthConfigOut
 from config import settings
 from ingestion.umpire_scorecards import _season_league_pitches
 
@@ -63,3 +64,16 @@ for router in (games.router, predictions.router, backtest.router, models.router,
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/health/config", response_model=HealthConfigOut)
+def health_config():
+    """Which optional API keys are configured, booleans only - never the
+    key values themselves. The frontend uses this to tell "no odds key
+    configured, every game is blank by design" apart from "key configured,
+    this specific game just has no odds snapshot yet" - two very
+    different states that used to render as the same unexplained '—'."""
+    return HealthConfigOut(
+        odds_api_key_configured=settings.has_odds_key,
+        weather_api_key_configured=settings.has_weather_key,
+    )
