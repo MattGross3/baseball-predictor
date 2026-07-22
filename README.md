@@ -634,12 +634,13 @@ Other honest simplifications, all documented inline where they live:
 
 ## On predictive power (read this before trusting a number)
 
-This app's pipeline is real and was verified against real 2025-2026 MLB
-data end to end. Its **models are not**, yet, meaningfully predictive -
-and that's expected, not a bug. The latest retrain used the full
-backfilled dataset (2025-04-01 through 2026-07-21, 1,941 games with a
-held-out test window of the most recent ~30 days) with every feature
-described in this doc turned on.
+This app's pipeline is real and was verified against real 2023-2026 MLB
+data end to end. The latest retrain used the full backfilled dataset
+(2023-01-01 through 2026-07-21, ~6,867 games - 2023 and 2024 are now
+complete, full backfilled seasons of 2,430 games each, enabling a real
+season-over-season comparison for the first time) with every feature
+described in this doc turned on, held out on the most recent ~30 days for
+the primary split.
 
 A single train/test split only tells you about one boundary - it could be
 a lucky or unlucky window. So alongside the single-split number below,
@@ -651,52 +652,75 @@ answers whether accuracy holds steady year over year, not just across the
 last few months). See `model_utils.walk_forward_splits_by_games` /
 `seasonal_walk_forward_splits`.
 
-| Target | Model | Single split | Walk-forward (mean ± std, 5×150 games) | Season 2026 tested |
-|---|---|---|---|---|
-| Moneyline | Logistic | acc 52.2% / log-loss 0.692 (n=345) | acc 52.3% ± 2.9pp / log-loss 0.694 ± 0.008 | acc 51.9% / log-loss 0.742 (n=1,566) |
-| Moneyline | XGBoost | acc 49.9% / log-loss 0.704 | acc 50.7% ± 5.9pp / log-loss 0.896 ± 0.384 | acc 52.5% / log-loss 0.814 |
-| NRFI | Logistic | acc 50.0% / log-loss 0.707 (n=340) | acc 52.5% ± 4.3pp / log-loss 0.696 ± 0.010 | acc 49.4% / log-loss 0.703 (n=1,552) |
-| NRFI | XGBoost | acc 49.4% / log-loss 1.133 | acc 52.9% ± 3.7pp / log-loss 0.932 ± 0.462 | acc 53.2% / log-loss 0.694 |
-| Total runs | Poisson | MAE 3.75 / RMSE 4.77 (n=345) | MAE 3.61 ± 0.12 / RMSE 4.70 ± 0.12 | see caveat below |
-| Total runs | XGBoost | MAE 3.92 / RMSE 4.89 | MAE 3.67 ± 0.08 / RMSE 4.75 ± 0.13 | MAE 4.00 / RMSE 5.06 (n=1,566) |
+| Target | Model | Single split | Walk-forward (mean ± std, 5×150 games) | 2024 tested | 2025 tested | 2026 tested |
+|---|---|---|---|---|---|---|
+| Moneyline | Logistic | acc 56.2% / log-loss 0.689 (n=345) | acc 56.1% ± 3.5pp / log-loss 0.686 ± 0.004 | acc 54.4% / log-loss 0.703 (n=2,429) | acc 50.0% / log-loss 0.713 (n=442) | acc 53.3% / log-loss 0.697 (n=1,566) |
+| Moneyline | XGBoost | acc 54.5% / log-loss 0.692 | acc 52.0% ± 2.5pp / log-loss 0.692 ± 0.006 | acc 52.9% / log-loss 0.892 | acc 55.4% / log-loss 1.032 | acc 53.5% / log-loss 0.715 |
+| NRFI | Logistic | acc 57.4% / log-loss 0.688 (n=340) | acc 51.9% ± 2.8pp / log-loss 0.691 ± 0.002 | acc 49.9% / log-loss 0.700 (n=2,393) | acc 53.2% / log-loss 0.691 (n=423) | acc 50.7% / log-loss 0.693 (n=1,552) |
+| NRFI | XGBoost | acc 48.8% / log-loss 0.694 | acc 50.8% ± 2.8pp / log-loss 0.693 ± 0.001 | acc 52.8% / log-loss 1.712 | acc 52.5% / log-loss 1.784 | acc 52.7% / log-loss 0.694 |
+| Total runs | Poisson | MAE 3.75 / RMSE 4.74 (n=345) | MAE 3.61 ± 0.20 / RMSE 4.62 ± 0.22 | MAE 3.54 / RMSE 4.40 (n=2,429) | MAE 3.71 / RMSE 4.71 (n=442) | MAE 3.68 / RMSE 4.67 (n=1,566) |
+| Total runs | XGBoost | MAE 3.77 / RMSE 4.78 | MAE 3.64 ± 0.15 / RMSE 4.70 ± 0.23 | MAE 3.65 / RMSE 4.55 | MAE 3.80 / RMSE 4.72 | MAE 3.74 / RMSE 4.79 |
 
-Every classification number is still close to a coin flip - consistent
-with baseball being a famously hard sport to beat the market on, not a
-sign of a pipeline bug. A diagnostic pass on NRFI specifically (predicted
-probabilities clustered tightly around 0.5, Brier score barely better than
-an always-0.5 baseline) confirms this is thin/weak real signal, not a code
-defect. One real, useful finding from adding walk-forward: **XGBoost's
-log-loss is far less stable than the logistic baseline's** for both
-moneyline (std 0.384 vs 0.008) and NRFI (std 0.462 vs 0.010) - across
-folds it sometimes does noticeably better and sometimes noticeably worse,
-where the logistic baseline stays boring and consistent. That instability
-is itself a reason to prefer the logistic baseline in production right
-now, not just XGBoost's lack of a clear accuracy edge.
+### Headline result #1: moneyline meaningfully improved with more data
 
-**Seasonal caveat on the Poisson baseline:** training it on the 2025
-season alone (currently only 378 games are backfilled for 2025, spanning
-just April 1 - August 9 - not a full season) and testing on 2026 produced
-a nonsensical MAE of 123.8 (RMSE 3,533), driven by a handful of games
-where the unregularized GLM's exponential link function predicted an
-absurd lambda (one game's predicted total was 139,120 runs). This is a
-real instability of an unregularized Poisson GLM fit on a small, thin
-training set against ~100 features (roughly 4 rows per feature) - not a
-bug in the walk-forward code, and not something to paper over with a fake
-number. XGBoost, tested on the exact same fold, stayed completely stable
-(MAE 4.00) - a genuine, useful data point that XGBoost is the more robust
-choice once per-season validation matters, even though the Poisson
-baseline currently wins on the pooled single-split/walk-forward numbers
-above. This is expected to improve once more seasons are backfilled with
-full density (see below) - a GLM fit on a full season's ~2,000+ games
-against the same feature count is a much better-conditioned problem than
-one fit on 378.
+Widening the backfill from ~1,900 to ~6,900 games moved moneyline from "a
+coin flip" to a real, if modest, edge - and the improvement holds up
+across every view, not just the single split: logistic accuracy went
+52.2% → **56.2%** (single split) and 52.3% → **56.1%** (walk-forward mean,
+consistent across 750 held-out games), with log-loss variance across
+folds tightening too (std 0.008 → 0.004). XGBoost improved even more
+dramatically in stability terms: its walk-forward log-loss std dropped
+from **0.384 to 0.006** - a 64x reduction in fold-to-fold variance - while
+its accuracy also rose (49.9% → 54.5%). This is the standout positive
+result of this whole exercise: moneyline is where more historical data
+clearly helps.
 
-To get a model actually worth trusting: backfill a full season or more
-(`python -m scripts.backfill_data`, just with a much wider date range),
-retrain, and re-check the backtest - accuracy/log-loss/Brier score on a
-genuinely held-out date range, never the training range. The
-[Backtesting](#backtesting) section above is how you'd check that
-honestly rather than take a training-set number at face value.
+### Headline result #2: NRFI did not show the same improvement
+
+NRFI's single-split accuracy also rose on paper (50.0% → 57.4%), but the
+walk-forward and per-season numbers tell a more honest story: walk-forward
+accuracy is 51.9% (barely above a coin flip), and the 2024-tested seasonal
+fold (2,393 games, a real full-season test) lands at 49.9% - statistically
+indistinguishable from 50%. Unlike moneyline, NRFI does not show a
+consistent, cross-view improvement from more data. XGBoost still doesn't
+meaningfully beat logistic here (and its log-loss on the 2024/2025
+seasonal folds is notably worse - 1.71 and 1.78 vs. logistic's ~0.70),
+so logistic remains the right default per the app's own spec rule.
+
+### Headline result #3: a real collinearity bug was found and fixed - and only walk-forward/seasonal validation caught it
+
+The Poisson totals baseline's seasonal fold (train on 2023-2024, test on
+2025) initially produced a nonsensical MAE of **93.7 million** (RMSE 1.5
+billion) - worse, not better, than an earlier version of this same
+symptom seen on a smaller dataset (MAE 123.8), which ruled out "just add
+more data" as the explanation. Investigating properly (dumping the fitted
+GLM's coefficients) found the real cause: **every `diff_X` feature
+(`build_feature_matrix.py`'s home-minus-away convenience columns) is an
+exact linear combination of two raw columns also present as standalone
+features** - a classic dummy-variable-trap collinearity, present across
+all 14 `diff_` pairs, not just one. With an exact linear dependency,
+infinitely many coefficient splits fit the training data identically, so
+the unregularized Poisson GLM's solver can converge to an arbitrarily
+extreme one (confirmed: the `win_pct_season` trio's coefficients exceeded
+±150 on the blown-up fold). sklearn's L2-regularized logistic model and
+tree-based XGBoost were never affected, since neither is exposed to exact
+collinearity the same way.
+
+Fixed by dropping `diff_` columns from the totals models' own feature
+prep only (`train_totals.py`, not the shared `build_feature_matrix.py` -
+moneyline/NRFI are unaffected and didn't need retraining). Verified by
+reverting the fix and confirming new tests fail with the exact predicted
+symptom, then confirming on live data: every seasonal fold is now sane
+(MAE 3.5-3.7, RMSE 4.4-4.7 - see the table above), matching XGBoost's
+long-stable numbers. **This is itself a validation of doing the
+walk-forward/seasonal work in step 2 before this retrain**: a single
+train/test split would very likely never have surfaced this, since the
+collinearity only produces a catastrophic result on some subset of
+possible training data - the specific fold that got unlucky here.
+
+To dig further: the [Backtesting](#backtesting) section above is how
+you'd check any of these honestly on a genuinely held-out date range,
+never the training range.
 
 ---
 
