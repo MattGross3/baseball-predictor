@@ -55,7 +55,24 @@ WALK_FORWARD_TEST_SIZE_GAMES = 150
 
 
 def _prep(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, float]]:
-    cols = feature_columns(df)
+    # Every diff_X column (build_feature_matrix.py's home-minus-away
+    # convenience features) is an EXACT linear combination of two raw
+    # columns that are ALSO present standalone (home_X and away_X) - a
+    # classic dummy-variable-trap collinearity, present for all 14 diff_
+    # pairs. sklearn's L2-regularized logistic model and tree-based
+    # XGBoost tolerate this fine (train_moneyline.py/train_nrfi.py keep
+    # diff_ columns via the shared prepare_xy()), but statsmodels'
+    # unregularized Poisson GLM does not: with an exact linear dependency,
+    # infinitely many coefficient splits between home_X/away_X/diff_X fit
+    # the training data identically, so the IRLS solver can converge to an
+    # arbitrarily extreme split. Confirmed in practice on a real seasonal
+    # fold: |coefficient| > 150 for the win_pct_season trio, producing a
+    # predicted game total in the billions on live 2025 data (see the
+    # README's totals section for the full story). Drop diff_ columns
+    # here only (not from the shared build_feature_matrix.py output, so
+    # train_moneyline.py/train_nrfi.py are unaffected and don't need
+    # retraining) rather than hope IRLS lands on a tame solution.
+    cols = [c for c in feature_columns(df) if not c.startswith("diff_")]
     # Boolean feature columns (closer_available, lineup_confirmed,
     # roof_closed) survive pd.to_numeric as dtype `bool`, not `bool`->float -
     # a DataFrame that mixes bool/int64/float64 columns trips statsmodels'
