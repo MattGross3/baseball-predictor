@@ -217,6 +217,13 @@ export interface GameSyncResult {
   message: string
 }
 
+export interface PredictGenerateResult {
+  date: string
+  games: number
+  predictions_written: number
+  message: string
+}
+
 export interface SpreadResult {
   date_range: string
   roi_flat_bet: number | null

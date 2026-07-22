@@ -170,6 +170,13 @@ class GameSyncOut(BaseModel):
     message: str
 
 
+class PredictGenerateOut(BaseModel):
+    date: dt.date
+    games: int
+    predictions_written: int
+    message: str
+
+
 class ModelInfoOut(BaseModel):
     model_name: str
     target_type: str

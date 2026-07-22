@@ -18,6 +18,9 @@ export function TodaySlate() {
   const [syncing, setSyncing] = useState(false)
   const [syncMessage, setSyncMessage] = useState<string | null>(null)
 
+  const [predicting, setPredicting] = useState(false)
+  const [predictMessage, setPredictMessage] = useState<string | null>(null)
+
   useEffect(() => {
     let cancelled = false
     setLoading(true)
@@ -89,6 +92,25 @@ export function TodaySlate() {
       .finally(() => setSyncing(false))
   }
 
+  function generatePredictions() {
+    setPredicting(true)
+    setPredictMessage(null)
+
+    api
+      .generatePredictions(date)
+      .then((result) => {
+        setPredictMessage(result.message)
+        return api.getGameSlateSummary(date)
+      })
+      .then((fetchedSummaries) => {
+        setSummaries(Object.fromEntries(fetchedSummaries.map((summary) => [summary.game_id, summary])))
+      })
+      .catch((err: unknown) => {
+        setPredictMessage(err instanceof ApiError ? `API error (${err.status}): ${err.message}` : 'Could not reach the API.')
+      })
+      .finally(() => setPredicting(false))
+  }
+
   return (
     <div>
       <div className="flex items-start justify-between mb-6 flex-wrap gap-3">
@@ -100,6 +122,13 @@ export function TodaySlate() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            onClick={generatePredictions}
+            disabled={predicting}
+            className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface-card)] px-3 py-2 text-sm font-medium hover:border-[color:var(--color-ink-muted)] transition-colors disabled:opacity-50"
+          >
+            {predicting ? 'Predicting…' : 'Make predictions'}
+          </button>
           <button
             onClick={syncGames}
             disabled={syncing}
@@ -123,8 +152,9 @@ export function TodaySlate() {
         </div>
       </div>
 
-      {(syncMessage || refreshMessage) && (
+      {(predictMessage || syncMessage || refreshMessage) && (
         <div className="-mt-4 mb-6 space-y-1">
+          {predictMessage && <p className="text-xs text-[color:var(--color-ink-muted)]">{predictMessage}</p>}
           {syncMessage && <p className="text-xs text-[color:var(--color-ink-muted)]">{syncMessage}</p>}
           {refreshMessage && <p className="text-xs text-[color:var(--color-ink-muted)]">{refreshMessage}</p>}
         </div>

@@ -1,4 +1,4 @@
-import type { BacktestResult, Game, GameFeaturesResponse, GamePredictions, GameSlateSummary, GameSyncResult, ModelInfo, OddsRefreshResult, Prediction, SpreadResult } from './types'
+import type { BacktestResult, Game, GameFeaturesResponse, GamePredictions, GameSlateSummary, GameSyncResult, ModelInfo, OddsRefreshResult, PredictGenerateResult, Prediction, SpreadResult } from './types'
 
 // In dev, Vite proxies /api/* to the FastAPI backend (see vite.config.ts) -
 // same trick nginx.conf uses in production (see web/Dockerfile). Neither
@@ -29,8 +29,14 @@ async function get<T>(path: string, params?: Record<string, string | undefined>)
   return res.json() as Promise<T>
 }
 
-async function post<T>(path: string): Promise<T> {
-  const res = await fetch(new URL(BASE + path, window.location.origin).toString(), { method: 'POST' })
+async function post<T>(path: string, params?: Record<string, string | undefined>): Promise<T> {
+  const url = new URL(BASE + path, window.location.origin)
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) url.searchParams.set(key, value)
+    }
+  }
+  const res = await fetch(url.toString(), { method: 'POST' })
   if (!res.ok) {
     const body = await res.text().catch(() => '')
     throw new ApiError(res.status, body || res.statusText)
@@ -55,6 +61,7 @@ export const api = {
   listModels: () => get<ModelInfo[]>('/models'),
   refreshOdds: () => post<OddsRefreshResult>('/odds/refresh'),
   syncGames: () => post<GameSyncResult>('/games/sync'),
+  generatePredictions: (date?: string) => post<PredictGenerateResult>('/games/predict', { date }),
 }
 
 export { ApiError }

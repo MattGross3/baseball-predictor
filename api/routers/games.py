@@ -5,10 +5,19 @@ import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from api.schemas import GameFeaturesOut, GameOut, GamePredictionsOut, GameSlateSummaryOut, GameSyncOut, OddsOut, PredictionOut
+from api.schemas import (
+    GameFeaturesOut,
+    GameOut,
+    GamePredictionsOut,
+    GameSlateSummaryOut,
+    GameSyncOut,
+    OddsOut,
+    PredictGenerateOut,
+    PredictionOut,
+)
 from backtest.clv_tracker import american_to_implied_prob, devig_two_way
 from database.db import get_db
 from database.models import Game, GameFeatureCache, OddsSnapshot, Player, Prediction
@@ -57,6 +66,50 @@ def sync_games(days_ahead: int = 3):
         days_synced=days_ahead + 1,
         games_seen=total_games,
         message=f"Synced {today} through {end_date} - {total_games} game{'s' if total_games != 1 else ''} seen.",
+    )
+
+
+@router.post("/predict", response_model=PredictGenerateOut)
+def generate_predictions(date: dt.date | None = None, db: Session = Depends(get_db)):
+    """On-demand prediction generation for a date's slate (Section 10's
+    ~1hr-pre-game job_pregame_predictions job), for whenever a user doesn't
+    want to wait for the scheduler process - the common case in this dev
+    setup where scheduler/daily_jobs.py isn't running continuously, which
+    is exactly why a day's games can show blank predictions until this
+    runs. `date` defaults to today.
+
+    Reuses models.predict.generate_predictions_for_date, which already
+    upserts per (game, target_type, model) - safe to call repeatedly (e.g.
+    re-running after a starter gets confirmed) without creating duplicate
+    prediction rows, and already skips/logs individual games it can't
+    build a feature row for (no starter yet, no trained model) rather than
+    failing the whole batch.
+
+    Passes all_models=True (unlike the scheduler's pregame job, which only
+    needs the one preferred model Today's Slate/Game Detail display) -
+    the totals target's preferred model is XGBoost, which predicts one
+    combined number with no home/away split, so without also generating
+    the Poisson baseline here, Today's Slate's per-team predicted-score
+    cell would stay blank even after a successful "make predictions"
+    click (see get_games_today_summary's split_source fallback, which
+    needs a total prediction with a real split to have anything to fall
+    back to).
+    """
+    from models.predict import generate_predictions_for_date
+
+    target_date = date or dt.date.today()
+    games_count = db.execute(select(func.count()).select_from(Game).where(Game.date == target_date)).scalar_one()
+    written = generate_predictions_for_date(db, target_date, all_models=True)
+    db.commit()
+
+    return PredictGenerateOut(
+        date=target_date,
+        games=games_count,
+        predictions_written=written,
+        message=(
+            f"Generated {written} prediction{'s' if written != 1 else ''} "
+            f"across {games_count} game{'s' if games_count != 1 else ''} on {target_date}."
+        ),
     )
 
 
