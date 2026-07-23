@@ -8,8 +8,8 @@ from fastapi.encoders import jsonable_encoder
 from sqlalchemy import extract, select
 from sqlalchemy.orm import Session
 
-from api.schemas import BacktestResultOut, SpreadResultOut
-from backtest.backtest_engine import run_backtest, simulate_run_line_bets
+from api.schemas import BacktestResultOut, HighConfidenceResultOut, SpreadResultOut
+from backtest.backtest_engine import CONFIDENCE_THRESHOLD_DEFAULT, high_confidence_accuracy, run_backtest, simulate_run_line_bets
 from database.db import get_db
 from database.models import BacktestCache, Game
 
@@ -81,6 +81,63 @@ def backtest_results(
     db.commit()
 
     return BacktestResultOut(**result, computed_at=cached.computed_at)
+
+
+def _high_confidence_cache_key(model: str, threshold: float) -> str:
+    # Threshold is a second cache dimension /backtest/results doesn't have
+    # (that endpoint's result only ever varies by model+date_range) - fold
+    # it into a synthetic model_name the same way SPREAD_CACHE_KEY reuses
+    # this table for a non-model result, rather than adding a column.
+    return f"{model}_conf{int(round(threshold * 100))}"
+
+
+@router.get("/high-confidence", response_model=HighConfidenceResultOut)
+def high_confidence_results(
+    model: str = Query(..., description="Registered model name, e.g. moneyline_xgboost"),
+    date_range: str = Query(..., description="YYYY-MM-DD,YYYY-MM-DD"),
+    threshold: float = Query(CONFIDENCE_THRESHOLD_DEFAULT, ge=0.5, lt=1.0, description="Confidence cutoff, e.g. 0.6 for 60%"),
+    refresh: bool = Query(False, description="Recompute instead of serving a cached result"),
+    db: Session = Depends(get_db),
+):
+    """Accuracy restricted to the model's own high-confidence picks (see
+    backtest_engine.high_confidence_accuracy) - a different, harder
+    question than /backtest/results' plain accuracy: is the model actually
+    right more often specifically on the games it claims to be confident
+    about, not just right on average across everything including the
+    genuine coin-flip games where "confidence" isn't meaningful. Cached
+    the same way /backtest/results is, under a synthetic model name that
+    folds in the threshold.
+    """
+    try:
+        start_str, end_str = date_range.split(",")
+        start_date, end_date = dt.date.fromisoformat(start_str), dt.date.fromisoformat(end_str)
+    except ValueError as exc:
+        raise HTTPException(400, "date_range must be 'YYYY-MM-DD,YYYY-MM-DD'") from exc
+
+    cache_key = _high_confidence_cache_key(model, threshold)
+    cached = db.execute(
+        select(BacktestCache).where(
+            BacktestCache.model_name == cache_key,
+            BacktestCache.start_date == start_date,
+            BacktestCache.end_date == end_date,
+        )
+    ).scalar_one_or_none()
+    if cached is not None and not refresh:
+        return HighConfidenceResultOut(**cached.result_json, computed_at=cached.computed_at)
+
+    try:
+        result = high_confidence_accuracy(db, model, start_date, end_date, threshold)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+    if cached is None:
+        cached = BacktestCache(model_name=cache_key, start_date=start_date, end_date=end_date)
+        db.add(cached)
+    cached.result_json = jsonable_encoder(result)
+    cached.computed_at = dt.datetime.now(dt.timezone.utc)
+    db.commit()
+
+    return HighConfidenceResultOut(**result, computed_at=cached.computed_at)
 
 
 @router.get("/spread-results", response_model=SpreadResultOut)

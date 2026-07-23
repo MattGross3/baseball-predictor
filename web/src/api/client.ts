@@ -1,4 +1,4 @@
-import type { BacktestResult, Game, GameFeaturesResponse, GamePredictions, GameSlateSummary, GameSyncResult, HealthConfig, ModelInfo, OddsRefreshResult, PredictGenerateResult, Prediction, SpreadResult } from './types'
+import type { BacktestResult, Game, GameFeaturesResponse, GamePredictions, GameSlateSummary, GameSyncResult, HealthConfig, HighConfidenceResult, ModelInfo, OddsRefreshResult, PredictGenerateResult, Prediction, SpreadResult } from './types'
 
 // In dev, Vite proxies /api/* to the FastAPI backend (see vite.config.ts) -
 // same trick nginx.conf uses in production (see web/Dockerfile). Neither
@@ -63,6 +63,13 @@ export const api = {
   syncGames: () => post<GameSyncResult>('/games/sync'),
   generatePredictions: (date?: string) => post<PredictGenerateResult>('/games/predict', { date }),
   healthConfig: () => get<HealthConfig>('/health/config'),
+  highConfidenceResults: (model: string, dateRange: string, threshold?: number, refresh?: boolean) =>
+    get<HighConfidenceResult>('/backtest/high-confidence', {
+      model,
+      date_range: dateRange,
+      threshold: threshold != null ? String(threshold) : undefined,
+      refresh: refresh ? 'true' : undefined,
+    }),
 }
 
 export { ApiError }

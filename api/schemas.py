@@ -157,6 +157,28 @@ class SpreadResultOut(BaseModel):
     computed_at: dt.datetime | None = None
 
 
+class HighConfidenceResultOut(BaseModel):
+    """backtest_engine.high_confidence_accuracy's output - accuracy
+    restricted to games where the model's own probability cleared
+    `threshold` in either direction, not plain accuracy across everything.
+    `n` is the confident subset actually scored; `n_considered` is how
+    many games had a probability to check in the first place (every game
+    for moneyline/NRFI, only odds-covered games for totals - see that
+    function's docstring for why totals needs a market line to define a
+    probability at all)."""
+
+    model: str
+    target_type: str
+    date_range: str
+    threshold: float
+    accuracy: float | None = None
+    log_loss: float | None = None
+    brier_score: float | None = None
+    n: int
+    n_considered: int
+    computed_at: dt.datetime | None = None
+
+
 class HealthConfigOut(BaseModel):
     """Which optional API keys are configured - booleans only, never the
     key values. Lets the frontend distinguish "no key configured, blank by

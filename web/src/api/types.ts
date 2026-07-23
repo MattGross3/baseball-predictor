@@ -224,6 +224,19 @@ export interface PredictGenerateResult {
   message: string
 }
 
+export interface HighConfidenceResult {
+  model: string
+  target_type: string
+  date_range: string
+  threshold: number
+  accuracy: number | null
+  log_loss: number | null
+  brier_score: number | null
+  n: number
+  n_considered: number
+  computed_at: string | null
+}
+
 export interface HealthConfig {
   odds_api_key_configured: boolean
   weather_api_key_configured: boolean

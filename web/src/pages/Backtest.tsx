@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api } from '../api/client'
-import type { BacktestResult } from '../api/types'
+import type { BacktestResult, HighConfidenceResult } from '../api/types'
 import { MetricCard } from '../components/MetricCard'
 import { localIsoDate, localIsoDaysAgo } from '../lib/date'
 import { EmptyState, ErrorState, LoadingState } from '../components/States'
@@ -27,6 +27,9 @@ export function Backtest() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
+  const [highConfidence, setHighConfidence] = useState<HighConfidenceResult | null>(null)
+  const [highConfidenceLoading, setHighConfidenceLoading] = useState(false)
+
   const [trend, setTrend] = useState<WeekPoint[]>([])
   const [trendLoading, setTrendLoading] = useState(false)
   const [trendRequested, setTrendRequested] = useState(false)
@@ -46,6 +49,14 @@ export function Backtest() {
         if (!cancelled) setError(err instanceof Error ? err.message : `Backtest failed - is '${model}' trained yet?`)
       })
       .finally(() => !cancelled && setLoading(false))
+
+    setHighConfidence(null)
+    setHighConfidenceLoading(true)
+    api
+      .highConfidenceResults(model, `${start},${end}`, undefined, refresh)
+      .then((result) => !cancelled && setHighConfidence(result))
+      .catch(() => undefined) // same "is it trained yet" failure mode as the call above - the error banner already covers it
+      .finally(() => !cancelled && setHighConfidenceLoading(false))
 
     return () => {
       cancelled = true
@@ -146,6 +157,38 @@ export function Backtest() {
             <MetricCard label="ROI (Kelly)" value={overall.roi_kelly != null ? pct(overall.roi_kelly) : 'N/A'} />
             <MetricCard label="Avg CLV" value={overall.clv_avg != null ? `${overall.clv_avg.toFixed(2)}%` : 'N/A'} />
             <MetricCard label="Games scored" value={String(overall.n_bets)} hint={overall.date_range} />
+          </div>
+
+          <div className="mb-6">
+            <h3 className="text-sm font-semibold text-[color:var(--color-ink-muted)] mb-1">
+              Accuracy on high-confidence picks
+            </h3>
+            <p className="text-xs text-[color:var(--color-ink-faint)] mb-3">
+              Restricted to games where the model's own probability cleared 60% either way - a harder, more honest
+              question than the plain accuracy above, which averages in every genuine coin-flip game too.
+            </p>
+            {highConfidenceLoading && <LoadingState label="Scoring only the games the model called with real confidence…" />}
+            {!highConfidenceLoading && highConfidence && (
+              highConfidence.n > 0 ? (
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                  <MetricCard label={`Accuracy (${Math.round(highConfidence.threshold * 100)}%+ confidence)`} value={pct(highConfidence.accuracy)} />
+                  <MetricCard label="Log loss (confident picks)" value={num(highConfidence.log_loss)} />
+                  <MetricCard
+                    label="Confident picks"
+                    value={`${highConfidence.n} / ${highConfidence.n_considered}`}
+                    hint={highConfidence.target_type === 'total' ? 'of games with a market total line' : 'of games scored'}
+                  />
+                </div>
+              ) : (
+                <EmptyState
+                  message={
+                    highConfidence.n_considered === 0
+                      ? "No games with a market total line to check confidence against in this range."
+                      : `The model never reached ${Math.round(highConfidence.threshold * 100)}% confidence on any of the ${highConfidence.n_considered} games in this range.`
+                  }
+                />
+              )
+            )}
           </div>
 
           {!trendRequested && (

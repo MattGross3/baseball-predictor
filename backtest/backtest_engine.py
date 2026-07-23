@@ -37,6 +37,7 @@ FLAT_BET_SIZE = 100.0
 KELLY_FRACTION_CAP = 0.25  # cap Kelly stake at 25% of bankroll per bet - full Kelly is too aggressive for a single game's variance
 MIN_EDGE_TO_BET = 0.02  # require at least a 2-point edge over market-implied probability before "placing" a bet
 RUN_LINE_MIN_EDGE_RUNS = 0.5  # require the model's predicted margin to clear the run line by at least half a run before "placing" a spread bet
+CONFIDENCE_THRESHOLD_DEFAULT = 0.6  # see high_confidence_accuracy - >=60% (or <=40%) either direction counts as "confident"
 
 
 def _latest_registry_entry(db: Session, model_name: str) -> ModelRegistryEntry:
@@ -256,3 +257,112 @@ def run_backtest(db: Session, model_name: str, start_date: dt.date, end_date: dt
 
     result.setdefault("n_bets", 0)
     return result
+
+
+def _total_over_probability(distribution_over_totals: dict[int, float], line: float) -> float:
+    """P(actual combined total > line) from a poisson_run_distribution/
+    xgb_run_distribution's distribution_over_totals dict - the only way to
+    get a probability at all out of a regression target, so this is what
+    high_confidence_accuracy uses to define "60% confident" for totals."""
+    return sum(p for t, p in distribution_over_totals.items() if t > line)
+
+
+def high_confidence_accuracy(
+    db: Session,
+    model_name: str,
+    start_date: dt.date,
+    end_date: dt.date,
+    threshold: float = CONFIDENCE_THRESHOLD_DEFAULT,
+) -> dict:
+    """Accuracy restricted to games where the model's own probability
+    clears `threshold` in either direction - a genuinely different, harder
+    question than run_backtest's plain accuracy above: is the model
+    actually *right more often* on the games it claims to be confident
+    about, not just right on average across everything, including the
+    genuine coin-flip games where "confidence" isn't meaningful.
+
+    - Moneyline/NRFI: confident whenever predicted_probability >=
+      threshold or <= 1-threshold.
+    - Totals: has no native probability (it's a regression target) - a
+      game only counts if it has a market total line (from
+      odds_snapshots), used to compute the model's own implied P(over) /
+      P(under) via its run distribution (see _total_over_probability).
+      Games with no odds snapshot are excluded from `n_considered`
+      entirely, not counted as "not confident" - there's no probability
+      to even check without a line to check it against.
+
+    Returns the same {accuracy, log_loss, brier_score, n} shape
+    classification_metrics does, computed against "was this confident
+    pick actually correct" - which for totals means treating "the model's
+    own confidence in its over/under pick" as the probability and "did
+    that pick turn out right" as the binary outcome, since there's no
+    other way to define calibration for a point-estimate target. Also
+    includes `n_considered`, the number of games that had a probability to
+    check at all (every game for moneyline/NRFI, only odds-covered games
+    for totals) - distinct from `n`, the subset that actually cleared the
+    threshold.
+    """
+    entry = _latest_registry_entry(db, model_name)
+    bundle = load_model(entry.file_path)
+    model, feature_cols = bundle["model"], bundle["feature_columns"]
+    target = entry.target_type
+
+    base = {
+        "model": model_name, "target_type": target, "date_range": f"{start_date}..{end_date}",
+        "threshold": threshold, "accuracy": None, "log_loss": None, "brier_score": None,
+        "n": 0, "n_considered": 0,
+    }
+
+    df = build_training_matrix(db, start_date, end_date, target=target)
+    if df.empty:
+        return base
+
+    X = df[feature_cols].apply(pd.to_numeric, errors="coerce") if set(feature_cols).issubset(df.columns) else df.reindex(columns=feature_cols)
+    X = X.reindex(columns=feature_cols, fill_value=0).fillna(0).astype(float)
+
+    if target in ("moneyline", "nrfi"):
+        y_prob = model.predict_proba(X)[:, 1]
+        confident = (y_prob >= threshold) | (y_prob <= 1 - threshold)
+        base["n_considered"] = len(df)
+        if not confident.any():
+            return base
+        metrics = classification_metrics(df["label"][confident].to_numpy(), y_prob[confident])
+        return {**base, **metrics}
+
+    # total: needs a market line per game to define a probability at all.
+    from models.train_totals import poisson_run_distribution, xgb_run_distribution
+
+    is_poisson = "home" in model and "away" in model
+    picked_confidence: list[float] = []
+    pick_was_correct: list[int] = []
+    n_considered = 0
+
+    for i, row in df.reset_index(drop=True).iterrows():
+        odds_row = _earliest_odds(db, int(row["game_id"]))
+        if odds_row is None or odds_row.total is None:
+            continue
+        n_considered += 1
+
+        line = float(odds_row.total)
+        dist = poisson_run_distribution(model, X.iloc[[i]]) if is_poisson else xgb_run_distribution(model, X.iloc[[i]])
+        p_over = _total_over_probability(dist["distribution_over_totals"], line)
+        p_side = p_over if p_over >= 0.5 else 1 - p_over
+        if p_side < threshold:
+            continue
+
+        pick_over = p_over >= 0.5
+        actual_over = row["label"] > line
+        picked_confidence.append(p_side)
+        pick_was_correct.append(int(pick_over == actual_over))
+
+    base["n_considered"] = n_considered
+    if not pick_was_correct:
+        return base
+
+    # p_side (picked_confidence) is always >= threshold > 0.5 by
+    # construction, so classification_metrics' accuracy (which thresholds
+    # y_prob at 0.5) reduces to exactly mean(pick_was_correct) - and its
+    # log_loss/brier_score become a real calibration check: are 65%
+    # confident picks actually right about 65% of the time?
+    metrics = classification_metrics(pick_was_correct, picked_confidence)
+    return {**base, **metrics}

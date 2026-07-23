@@ -1,11 +1,16 @@
 import datetime as dt
 
+import numpy as np
+import pandas as pd
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+import backtest.backtest_engine as backtest_engine
+import models.train_totals as train_totals
+from backtest.backtest_engine import _total_over_probability, high_confidence_accuracy
 from backtest.clv_tracker import american_to_implied_prob, compute_clv, devig_two_way
-from database.models import Base, Game, OddsSnapshot, Prediction, Team
+from database.models import Base, Game, ModelRegistryEntry, OddsSnapshot, Prediction, Team
 
 
 class TestAmericanToImpliedProb:
@@ -153,3 +158,159 @@ class TestComputeEdgeVsMarket:
         # Devigged edge should be strictly more favorable (larger) than the
         # old raw-implied-probability edge would have been.
         assert result["edge"] > old_raw_edge
+
+
+class TestTotalOverProbability:
+    def test_sums_only_totals_strictly_above_the_line(self):
+        dist = {8: 0.25, 9: 0.75}
+        assert _total_over_probability(dist, 8.5) == 0.75
+
+    def test_totals_at_or_below_the_line_are_excluded(self):
+        dist = {8: 0.5, 9: 0.5}
+        assert _total_over_probability(dist, 9) == 0  # 9 is not > 9
+
+
+def _fake_registry_entry(db: Session, model_name: str, target_type: str) -> None:
+    db.add(ModelRegistryEntry(model_name=model_name, target_type=target_type, version="v1", file_path="unused.pkl"))
+    db.flush()
+
+
+class TestHighConfidenceAccuracyClassification:
+    """Moneyline/NRFI path: confidence is just the model's own predicted
+    probability - >=threshold or <=1-threshold counts, everything in
+    between is excluded as "not confident", not scored as wrong."""
+
+    def _make_four_games(self, db: Session) -> None:
+        db.add_all([
+            Team(id=1, mlb_team_id=100, name="Home Team", abbreviation="HOM", league="AL", division="AL East"),
+            Team(id=2, mlb_team_id=200, name="Away Team", abbreviation="AWY", league="AL", division="AL East"),
+        ])
+        for i in range(1, 5):
+            db.add(Game(id=i, mlb_game_id=i, date=dt.date(2026, 6, i), home_team_id=1, away_team_id=2, status="final", home_score=4, away_score=2))
+        db.flush()
+
+    def test_excludes_coin_flip_games_and_scores_only_confident_ones(self, db_session, monkeypatch):
+        self._make_four_games(db_session)
+        _fake_registry_entry(db_session, "moneyline_xgboost", "moneyline")
+
+        # game 1: p=0.90 (confident home), label=1 (home won)   -> correct
+        # game 2: p=0.15 (confident away), label=0 (away won)   -> correct
+        # game 3: p=0.50 (coin flip)                             -> excluded
+        # game 4: p=0.65 (confident home), label=0 (away won)   -> wrong
+        df = pd.DataFrame({
+            "game_id": [1, 2, 3, 4],
+            "date": [dt.date(2026, 6, 1), dt.date(2026, 6, 2), dt.date(2026, 6, 3), dt.date(2026, 6, 4)],
+            "label": [1, 0, 1, 0],
+        })
+        probs = [0.9, 0.15, 0.5, 0.65]
+
+        class FakeModel:
+            def predict_proba(self, X):
+                return np.array([[1 - p, p] for p in probs])
+
+        monkeypatch.setattr(backtest_engine, "build_training_matrix", lambda db, s, e, target: df)
+        monkeypatch.setattr(backtest_engine, "load_model", lambda path: {"model": FakeModel(), "feature_columns": ["f1"]})
+
+        result = high_confidence_accuracy(db_session, "moneyline_xgboost", dt.date(2026, 6, 1), dt.date(2026, 6, 5))
+
+        assert result["n_considered"] == 4
+        assert result["n"] == 3  # games 1, 2, 4 - game 3 excluded
+        assert round(result["accuracy"], 4) == round(2 / 3, 4)
+
+    def test_no_confident_games_returns_null_metrics_not_zero(self, db_session, monkeypatch):
+        self._make_four_games(db_session)
+        _fake_registry_entry(db_session, "nrfi_logistic", "nrfi")
+
+        df = pd.DataFrame({
+            "game_id": [1, 2],
+            "date": [dt.date(2026, 6, 1), dt.date(2026, 6, 2)],
+            "label": [1, 0],
+        })
+
+        class FakeModel:
+            def predict_proba(self, X):
+                return np.array([[0.5, 0.5], [0.45, 0.55]])  # neither clears 60%/40%
+
+        monkeypatch.setattr(backtest_engine, "build_training_matrix", lambda db, s, e, target: df)
+        monkeypatch.setattr(backtest_engine, "load_model", lambda path: {"model": FakeModel(), "feature_columns": ["f1"]})
+
+        result = high_confidence_accuracy(db_session, "nrfi_logistic", dt.date(2026, 6, 1), dt.date(2026, 6, 3))
+
+        assert result["n_considered"] == 2
+        assert result["n"] == 0
+        assert result["accuracy"] is None
+
+
+class TestHighConfidenceAccuracyTotals:
+    """Totals path: no native probability (it's a regression target), so
+    confidence comes from the model's own implied P(over)/P(under) versus
+    the market total line - which requires a real odds_snapshot per game,
+    not just a prediction."""
+
+    def _make_games_with_odds(self, db: Session, totals: dict[int, float]) -> None:
+        db.add_all([
+            Team(id=1, mlb_team_id=100, name="Home Team", abbreviation="HOM", league="AL", division="AL East"),
+            Team(id=2, mlb_team_id=200, name="Away Team", abbreviation="AWY", league="AL", division="AL East"),
+        ])
+        for game_id, total_line in totals.items():
+            db.add(Game(id=game_id, mlb_game_id=game_id, date=dt.date(2026, 6, game_id), home_team_id=1, away_team_id=2, status="final", home_score=5, away_score=4))
+            db.add(OddsSnapshot(game_id=game_id, timestamp=dt.datetime(2026, 6, game_id, 10), total=total_line))
+        db.flush()
+
+    def test_only_odds_covered_games_with_high_confidence_are_scored(self, db_session, monkeypatch):
+        # game A (f1=1): model says 75% over 8.5, actual total 9 (over)  -> correct, confident
+        # game B (f1=2): model says 95% under 8.5, actual total 9 (over) -> wrong, confident
+        # game C (f1=3): model says 50/50 on 8.5                        -> excluded, not confident
+        self._make_games_with_odds(db_session, {1: 8.5, 2: 8.5, 3: 8.5})
+        _fake_registry_entry(db_session, "totals_poisson", "total")
+
+        df = pd.DataFrame({
+            "game_id": [1, 2, 3],
+            "date": [dt.date(2026, 6, 1), dt.date(2026, 6, 2), dt.date(2026, 6, 3)],
+            "label": [9, 9, 8],
+            "f1": [1, 2, 3],
+        })
+        distributions = {
+            1: {8: 0.25, 9: 0.75},
+            2: {8: 0.95, 9: 0.05},
+            3: {8: 0.5, 9: 0.5},
+        }
+
+        def fake_poisson_run_distribution(poisson_models, feature_row):
+            f1 = int(feature_row["f1"].iloc[0])
+            return {"distribution_over_totals": distributions[f1]}
+
+        monkeypatch.setattr(backtest_engine, "build_training_matrix", lambda db, s, e, target: df)
+        monkeypatch.setattr(
+            backtest_engine, "load_model",
+            lambda path: {"model": {"home": "fake", "away": "fake"}, "feature_columns": ["f1"]},
+        )
+        monkeypatch.setattr(train_totals, "poisson_run_distribution", fake_poisson_run_distribution)
+
+        result = high_confidence_accuracy(db_session, "totals_poisson", dt.date(2026, 6, 1), dt.date(2026, 6, 4))
+
+        assert result["n_considered"] == 3  # all 3 games had a market total line
+        assert result["n"] == 2  # only A and B cleared 60% confidence
+        assert round(result["accuracy"], 4) == 0.5  # A correct, B wrong
+
+    def test_games_without_a_market_line_are_excluded_from_n_considered(self, db_session, monkeypatch):
+        self._make_games_with_odds(db_session, {1: 8.5})  # only game 1 has odds
+        _fake_registry_entry(db_session, "totals_poisson", "total")
+
+        df = pd.DataFrame({
+            "game_id": [1, 2],
+            "date": [dt.date(2026, 6, 1), dt.date(2026, 6, 2)],
+            "label": [9, 9],
+            "f1": [1, 1],
+        })
+
+        monkeypatch.setattr(backtest_engine, "build_training_matrix", lambda db, s, e, target: df)
+        monkeypatch.setattr(
+            backtest_engine, "load_model",
+            lambda path: {"model": {"home": "fake", "away": "fake"}, "feature_columns": ["f1"]},
+        )
+        monkeypatch.setattr(train_totals, "poisson_run_distribution", lambda pm, fr: {"distribution_over_totals": {8: 0.25, 9: 0.75}})
+
+        result = high_confidence_accuracy(db_session, "totals_poisson", dt.date(2026, 6, 1), dt.date(2026, 6, 3))
+
+        assert result["n_considered"] == 1  # game 2 has no odds snapshot, excluded entirely
